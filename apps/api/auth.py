@@ -1,0 +1,86 @@
+# ponytail: 注册/登录路由 + users表password_hash列运行时补齐
+
+import os
+import uuid
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
+
+from src.security.auth import hash_password, verify_password, create_access_token, get_current_user
+from src.storage.mysql import MySQLStore
+
+router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+
+def _mysql():
+    return MySQLStore(host=os.getenv("MYSQL_HOST", ""), port=int(os.getenv("MYSQL_PORT", "3306")),
+                      db=os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "deeprag")),
+                      user=os.getenv("MYSQL_USER", ""), password=os.getenv("MYSQL_PASSWORD", ""))
+
+
+async def _ensure_users_schema(mysql):
+    # ponytail: 确保default tenant存在(users.tenant_id外键) + users补name/password_hash列
+    await mysql.execute("INSERT IGNORE INTO tenants (id, name) VALUES ('default', 'Default Tenant')")
+    cols = {c["Field"] for c in await mysql.fetch("SHOW COLUMNS FROM users")}
+    if "name" not in cols:
+        await mysql.execute("ALTER TABLE users ADD COLUMN name VARCHAR(100) DEFAULT ''")
+    if "password_hash" not in cols:
+        await mysql.execute("ALTER TABLE users ADD COLUMN password_hash VARCHAR(100)")
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: dict
+
+
+@router.post("/register", response_model=AuthResponse)
+async def register(req: RegisterRequest):
+    if len(req.password) < 6:
+        raise HTTPException(400, "密码至少6位")
+    mysql = _mysql()
+    await mysql.connect()
+    try:
+        await _ensure_users_schema(mysql)
+        if await mysql.fetchrow("SELECT id FROM users WHERE email = %s", req.email):
+            raise HTTPException(400, "邮箱已注册")
+        user_id = str(uuid.uuid4())
+        await mysql.execute(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash) VALUES (%s, %s, %s, %s, %s)",
+            user_id, "default", req.email, req.name, hash_password(req.password))
+    finally:
+        await mysql.close()
+    return AuthResponse(token=create_access_token(user_id),
+                        user={"id": user_id, "email": req.email, "name": req.name, "tenant_id": "default"})
+
+
+@router.post("/login", response_model=AuthResponse)
+async def login(req: LoginRequest):
+    mysql = _mysql()
+    await mysql.connect()
+    try:
+        await _ensure_users_schema(mysql)
+        row = await mysql.fetchrow(
+            "SELECT id, tenant_id, email, name, password_hash FROM users WHERE email = %s", req.email)
+    finally:
+        await mysql.close()
+    if not row or not verify_password(req.password, row.get("password_hash", "")):
+        raise HTTPException(401, "邮箱或密码错误")
+    return AuthResponse(token=create_access_token(row["id"]),
+                        user={"id": row["id"], "email": row["email"],
+                              "name": row.get("name", ""), "tenant_id": row["tenant_id"] or "default"})
+
+
+@router.get("/me")
+async def me(user: dict = Depends(get_current_user)):
+    """前端校验token: 返回当前用户信息."""
+    return user

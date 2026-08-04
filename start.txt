@@ -1,0 +1,10 @@
+后端（在项目根 E:\DeepRAG）：
+cd /e/DeepRAG && python -m apps.api.main
+看到 Application startup complete. 就绪 → http://localhost:8000
+cd /e/DeepRAG && python -m apps.api.main
+看到 Application startup complete. 就绪 →http://localhost:8000
+
+前端（在 web/）：
+cd /e/DeepRAG/web && npm run dev
+看到 Local: http://localhost:5173/ 就绪 →浏览器开 http://localhost:5173
+停止各自 Ctrl+C。
