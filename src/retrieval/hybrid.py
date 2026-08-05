@@ -1,6 +1,5 @@
 # ponytail: hybrid检索 - dense(BGE-M3) + Qdrant原生BM25 + 加权RRF, 命中后从OSS拉文本+父块
 
-import os
 import asyncio
 from typing import List
 from dotenv import load_dotenv
@@ -10,6 +9,7 @@ from src.storage.qdrant_store import QdrantWriter
 from src.storage.mysql import MySQLStore
 from src.storage.oss import OssStore
 from src.retrieval.embedder import embed_query
+from src.core.config import Settings, get_settings
 
 load_dotenv()
 
@@ -17,28 +17,12 @@ load_dotenv()
 class HybridRetriever:
     """实现 Retriever Protocol. dense + BM25 服务端加权 RRF 融合."""
 
-    def __init__(self):
-        self.qdrant = QdrantWriter(
-            host=os.getenv("QDRANT_HOST", ""),
-            port=int(os.getenv("QDRANT_PORT", "6333")),
-            api_key=os.getenv("QDRANT_API_KEY", ""),
-        )
-        self.oss = OssStore(
-            endpoint=os.getenv("OSS_ENDPOINT", ""),
-            bucket=os.getenv("OSS_BUCKET", ""),
-            access_key_id=os.getenv("OSS_ACCESS_KEY_ID", ""),
-            access_key_secret=os.getenv("OSS_ACCESS_KEY_SECRET", ""),
-        )
-
-    def _mysql(self):
-        # ponytail: 每次retrieve独立MySQLStore, 避免并行(多跳asyncio.gather)时共享pool的close竞争
-        return MySQLStore(
-            host=os.getenv("MYSQL_HOST", ""),
-            port=int(os.getenv("MYSQL_PORT", "3306")),
-            db=os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "deeprag")),
-            user=os.getenv("MYSQL_USER", ""),
-            password=os.getenv("MYSQL_PASSWORD", ""),
-        )
+    def __init__(self, qdrant=None, oss=None, mysql=None, settings=None):
+        # ponytail: 阶段5 — 存储实例注入(依赖倒置, lifespan建共享实例); None则settings兜底(兼容scripts)
+        self._settings = settings or get_settings()
+        self.qdrant = qdrant or QdrantWriter(cfg=self._settings.qdrant_cfg)
+        self.oss = oss or OssStore(cfg=self._settings.oss_cfg)
+        self._mysql_store = mysql or MySQLStore(cfg=self._settings.mysql_cfg)
 
     async def retrieve(self, query: str, filters: RetrievalFilter, top_k: int) -> List[RetrievedDocument]:
         dense = await embed_query(query)
@@ -62,16 +46,14 @@ class HybridRetriever:
         need_mysql = [str(p.id) for p in res if not (p.payload or {}).get("content")]
         content_tasks: dict[str, asyncio.Task] = {}
         if need_mysql:
-            mysql = self._mysql()
-            await mysql.connect()
-            try:
-                ph = ",".join(["%s"] * len(need_mysql))
-                rows = await mysql.fetch(f"SELECT id, oss_key FROM chunks WHERE id IN ({ph})", *need_mysql)
-                for r in rows:
-                    if r.get("oss_key"):
-                        content_tasks[r["id"]] = asyncio.ensure_future(_get(r["oss_key"]))
-            finally:
-                await mysql.close()
+            # ponytail: 共享mysql已connect(lifespan)或lazy connect(scripts); 不每次connect/close
+            if self._mysql_store.pool is None:
+                await self._mysql_store.connect()
+            ph = ",".join(["%s"] * len(need_mysql))
+            rows = await self._mysql_store.fetch(f"SELECT id, oss_key FROM chunks WHERE id IN ({ph})", *need_mysql)
+            for r in rows:
+                if r.get("oss_key"):
+                    content_tasks[r["id"]] = asyncio.ensure_future(_get(r["oss_key"]))
 
         pmap = dict(zip(parent_tasks.keys(), await asyncio.gather(*parent_tasks.values()))) if parent_tasks else {}
         cmap = dict(zip(content_tasks.keys(), await asyncio.gather(*content_tasks.values()))) if content_tasks else {}

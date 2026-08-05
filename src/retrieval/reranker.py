@@ -6,6 +6,7 @@ from typing import List
 from dotenv import load_dotenv
 
 from src.storage.protocol import RetrievedDocument
+from src.core.logging import log
 
 load_dotenv()
 
@@ -39,5 +40,5 @@ async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> L
         return ranked
     except Exception as e:
         # ponytail: rerank失败不阻塞主流程, 回退原序(已融合的RRF序)裁剪top_n
-        print(f"[rerank] 回退原序: {type(e).__name__}: {e}")
+        log.warning("rerank 回退原序", error=type(e).__name__, msg=str(e))
         return docs[:top_n]

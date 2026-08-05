@@ -1,10 +1,10 @@
-# ponytail: 最小化API, 挂载 documents + query 路由
+# ponytail: 最小化API, 挂载路由; lifespan装配共享resources
 
-import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 
+from src.core.lifespan import lifespan, get_resources
+from src.core.logging import setup_logging
 from .documents import router as documents_router
 from .kb import router as kb_router
 from .query import router as query_router
@@ -12,9 +12,8 @@ from .auth import router as auth_router
 from .monitor import router as monitor_router
 from .conversations import router as conversations_router
 
-load_dotenv()
-
-app = FastAPI(title="DeepRAG")
+setup_logging()  # ponytail: 尽早配置structlog(任何log前)
+app = FastAPI(title="DeepRAG", lifespan=lifespan)
 # ponytail: CORS允许前端(Vite默认5173)跨域调用
 app.add_middleware(CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
@@ -33,24 +32,18 @@ async def root():
 
 
 @app.get("/health")
-async def health():
-    # ponytail: 实际ping主要依赖
+async def health(res=Depends(get_resources)):
+    """依赖健康(ping共享resources)."""
     status = {"api": "ok", "mysql": "unknown", "qdrant": "unknown"}
     try:
-        from src.storage.mysql import MySQLStore
-        m = MySQLStore(host=os.getenv("MYSQL_HOST"), port=int(os.getenv("MYSQL_PORT")),
-                       db=os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "deeprag")),
-                       user=os.getenv("MYSQL_USER"), password=os.getenv("MYSQL_PASSWORD"))
-        await m.connect()
-        await m.close()
+        async with res.mysql.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
         status["mysql"] = "ok"
     except Exception as e:
         status["mysql"] = f"error: {type(e).__name__}"
     try:
-        from src.storage.qdrant_store import QdrantWriter
-        q = QdrantWriter(host=os.getenv("QDRANT_HOST"), port=int(os.getenv("QDRANT_PORT")),
-                         api_key=os.getenv("QDRANT_API_KEY", ""))
-        q.client.get_collection(q.collection_name)
+        res.qdrant.client.get_collection(res.qdrant.collection_name)
         status["qdrant"] = "ok"
     except Exception as e:
         status["qdrant"] = f"error: {type(e).__name__}"
@@ -59,4 +52,6 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=os.getenv("API_HOST", "0.0.0.0"), port=int(os.getenv("API_PORT", "8000")))
+    from src.core.config import get_settings
+    s = get_settings()
+    uvicorn.run(app, host=s.api_host, port=s.api_port)

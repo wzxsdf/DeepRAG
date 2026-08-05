@@ -3,15 +3,20 @@
 import aiomysql
 from typing import Optional
 
+from src.core.config import MySQLCfg
+
 class MySQLStore:
     def __init__(
         self,
+        cfg: MySQLCfg | None = None,
         host: str = "localhost",
         port: int = 3306,
         db: str = "deeprag",  # ponytail: 支持 MYSQL_DATABASE 和 MYSQL_DB
         user: str = "deeprag",
         password: str = "deeprag_dev",
     ):
+        if cfg is not None:  # ponytail: cfg注入(阶段1), 旧kwargs调用向后兼容
+            host, port, db, user, password = cfg.host, cfg.port, cfg.db, cfg.user, cfg.password
         self.host = host
         self.port = port
         self.db = db

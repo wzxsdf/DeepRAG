@@ -2,15 +2,20 @@
 
 import oss2
 from .protocol import ObjectStore, ObjectMeta, PresignedUpload
+from src.core.config import OSSCfg
 
 class OssStore(ObjectStore):
     def __init__(
         self,
-        endpoint: str,
-        bucket: str,
-        access_key_id: str,
-        access_key_secret: str,
+        cfg: OSSCfg | None = None,
+        endpoint: str = "",
+        bucket: str = "deeprag-dev",
+        access_key_id: str = "",
+        access_key_secret: str = "",
     ):
+        if cfg is not None:  # ponytail: cfg注入(阶段1), 旧kwargs向后兼容
+            endpoint, bucket = cfg.endpoint, cfg.bucket
+            access_key_id, access_key_secret = cfg.access_key_id, cfg.access_key_secret
         auth = oss2.Auth(access_key_id, access_key_secret)
         self.bucket = oss2.Bucket(auth, endpoint, bucket)
 

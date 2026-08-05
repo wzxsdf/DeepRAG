@@ -1,41 +1,16 @@
 # ponytail: /query + /query/stream(SSE Agent节点进度流) + 多轮持久化(带user_id)
-
-import os
+# 阶段3: graph/mysql经Depends注入共享resources(lifespan建), 不再全局懒单例
 import json
 import uuid
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from dotenv import load_dotenv
 from sse_starlette.sse import EventSourceResponse
 
 from src.storage.mysql import MySQLStore
-from src.retrieval.hybrid import HybridRetriever
-from src.agents.graph import build_graph
 from src.security.auth import oauth2_scheme, decode_token
+from src.core.lifespan import get_graph, get_mysql
 
-load_dotenv()
 router = APIRouter(prefix="/api/v1", tags=["query"])
-
-_retriever = None
-_graph = None
-_mysql = None
-
-
-def _get_graph():
-    global _retriever, _graph
-    if _graph is None:
-        _retriever = HybridRetriever()
-        _graph = build_graph(_retriever)
-    return _graph
-
-
-def _get_mysql():
-    global _mysql
-    if _mysql is None:
-        _mysql = MySQLStore(host=os.getenv("MYSQL_HOST", ""), port=int(os.getenv("MYSQL_PORT", "3306")),
-                            db=os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "deeprag")),
-                            user=os.getenv("MYSQL_USER", ""), password=os.getenv("MYSQL_PASSWORD", ""))
-    return _mysql
 
 
 async def _ensure_conv_table(mysql):
@@ -102,12 +77,9 @@ class QueryResponse(BaseModel):
 
 
 async def _persist(mysql, conv_id, user_id, question, ans):
-    await mysql.connect()
-    try:
-        await _save_message(mysql, conv_id, "user", question, user_id)
-        await _save_message(mysql, conv_id, "assistant", ans, user_id)
-    finally:
-        await mysql.close()
+    # ponytail: 共享池不再connect/close
+    await _save_message(mysql, conv_id, "user", question, user_id)
+    await _save_message(mysql, conv_id, "assistant", ans, user_id)
 
 
 def _step_detail(node: str, update: dict) -> dict:
@@ -145,17 +117,12 @@ def _step_detail(node: str, update: dict) -> dict:
 
 
 @router.post("/query", response_model=QueryResponse)
-async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme)):
-    graph = _get_graph()
-    mysql = _get_mysql()
+async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
+                graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql)):
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = _user_id_from_token(token)
-    await mysql.connect()
-    try:
-        await _ensure_conv_table(mysql)
-        history = await _load_history(mysql, conv_id)
-    finally:
-        await mysql.close()
+    await _ensure_conv_table(mysql)
+    history = await _load_history(mysql, conv_id)
 
     cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
     await graph.ainvoke(
@@ -179,18 +146,13 @@ async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme)):
 
 
 @router.post("/query/stream")
-async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_scheme)):
+async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
+                       graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql)):
     """SSE流式: 推送Agent各节点进度(step事件) + 最终done事件(answer+citations). 非token级(LLM非流), 展示Agent流程."""
-    graph = _get_graph()
-    mysql = _get_mysql()
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = _user_id_from_token(token)
-    await mysql.connect()
-    try:
-        await _ensure_conv_table(mysql)
-        history = await _load_history(mysql, conv_id)
-    finally:
-        await mysql.close()
+    await _ensure_conv_table(mysql)
+    history = await _load_history(mysql, conv_id)
     cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
 
     async def event_gen():

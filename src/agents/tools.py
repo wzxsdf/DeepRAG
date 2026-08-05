@@ -5,9 +5,13 @@ import json
 import ast
 import math
 from langgraph.config import get_stream_writer
+from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
+from langchain.agents.middleware import AgentMiddleware
 from src.agents.llm import chat_message
 from src.retrieval.reranker import rerank
 from src.storage.protocol import RetrievalFilter
+from src.core.logging import log
 
 SEARCH_TOOL = {
     "type": "function",
@@ -18,19 +22,6 @@ SEARCH_TOOL = {
             "type": "object",
             "properties": {"query": {"type": "string", "description": "检索查询(关键词或问句)"}},
             "required": ["query"],
-        },
-    },
-}
-
-WEATHER_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "查询指定城市的实时天气（温度、天气状况）。需要实时天气信息时调用。",
-        "parameters": {
-            "type": "object",
-            "properties": {"city": {"type": "string", "description": "城市英文名或拼音（如 Beijing, Shanghai, New York）"}},
-            "required": ["city"],
         },
     },
 }
@@ -67,19 +58,6 @@ async def get_weather(city: str) -> str:
     except Exception:
         return "(天气服务暂不可用)"
 
-
-CALCULATOR_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "calculate",
-        "description": "精确计算数学表达式（四则运算、幂、括号、数学函数）。需要精确数值计算时调用，避免心算出错。",
-        "parameters": {
-            "type": "object",
-            "properties": {"expression": {"type": "string", "description": "数学表达式，如 (1+2)*3, sqrt(16), 2**10"}},
-            "required": ["expression"],
-        },
-    },
-}
 
 # ponytail: ast安全白名单——允许的运算符/函数, 其余节点(Name/Attribute/非白名单Call)一律拒, 防 LLM 注入
 _ALLOWED_BINOPS = {ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv}
@@ -131,20 +109,6 @@ def calculate(expression: str) -> str:
         return f"(无法计算: {type(e).__name__})"
 
 
-WEB_SEARCH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": "搜索互联网获取最新信息或通用知识（新闻、技术资料、事件进展等）。知识库和天气工具无法满足时调用。",
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "搜索查询词"}},
-            "required": ["query"],
-        },
-    },
-}
-
-
 async def web_search(query: str) -> str:
     """Tavily搜索: 返回answer摘要+top3结果. 无key/失败返回友好提示(不抛).
     ponytail: 抽象预留Bing分支(BING_API_KEY配置即启用), 本次只实现Tavily."""
@@ -180,19 +144,47 @@ def get_time() -> str:
     return now.strftime(f"%Y-%m-%d %H:%M:%S {wd}")
 
 
-TIME_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "get_time",
-        "description": "查询当前时间和日期(年月日时分秒+星期)。需要知道现在时间时调用。",
-        "parameters": {"type": "object", "properties": {}},
-    },
-}
+# ponytail: create_agent 的 @tool 包装(取代dict+dispatch) — schema自动从签名+docstring生成, 复用上方裸函数实现
+@tool
+async def search_kb_tool(query: str, config: RunnableConfig) -> str:
+    """在知识库检索与查询相关的文档片段。需要查找事实证据(如简历内容、上传文档)时调用。"""
+    cfg = (config or {}).get("configurable", {})
+    retriever = cfg.get("retriever")
+    if retriever is None:
+        return "(检索器未配置)"
+    tenant_id = cfg.get("tenant_id", "default")
+    kb_ids = cfg.get("kb_ids")
+    docs = await retriever.retrieve(query, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
+    docs = await rerank(query, docs, top_n=3)
+    return "\n".join(f"- {d.content[:150]}" for d in docs) or "(无结果)"
 
 
-# ponytail: quick/agent常态共用工具集(含KB检索), 取代原EXTERNAL_TOOLS; 开放-封闭, 加工具只改这里
-# 放在所有工具定义之后, 避免前向引用 NameError
-REACT_TOOLS = [SEARCH_TOOL, WEATHER_TOOL, CALCULATOR_TOOL, WEB_SEARCH_TOOL, TIME_TOOL]
+@tool
+async def weather_tool(city: str) -> str:
+    """查询指定城市的实时天气(温度、天气状况)。需要实时天气时调用。"""
+    return await get_weather(city)
+
+
+@tool
+def calc_tool(expression: str) -> str:
+    """精确计算数学表达式(四则运算、幂、括号、数学函数)。需要精确数值计算时调用。"""
+    return calculate(expression)
+
+
+@tool
+async def web_search_tool(query: str) -> str:
+    """搜索互联网获取最新信息或通用知识(新闻、技术资料、事件进展)。知识库和天气无法满足时调用。"""
+    return await web_search(query)
+
+
+@tool
+def time_tool() -> str:
+    """查询当前时间和日期(年月日时分秒+星期)。需要知道现在时间时调用。"""
+    return get_time()
+
+
+# create_agent 工具集(quick/agent常态共用); config 注入retriever/tenant/kb_ids实现per-request上下文
+REACT_AGENT_TOOLS = [search_kb_tool, weather_tool, calc_tool, web_search_tool, time_tool]
 
 
 async def run_search_agent(retriever, question: str, tenant_id: str = "default",
@@ -248,7 +240,7 @@ async def run_search_agent(retriever, question: str, tenant_id: str = "default",
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": snippet})
     except Exception as e:
         # ponytail: 工具调用不可用(端点不支持tools/解析失败) → 回退单次检索, 不阻塞主流程
-        print(f"[search_agent] 回退单次检索: {type(e).__name__}: {e}")
+        log.warning("search_agent 回退单次检索", error=type(e).__name__, msg=str(e))
         docs = await retriever.retrieve(question, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
         return await rerank(question, docs, top_n=5)
 
@@ -256,81 +248,6 @@ async def run_search_agent(retriever, question: str, tenant_id: str = "default",
     if not docs:  # Agent未触发任何search → 兜底用原问题检索一次
         docs = await retriever.retrieve(question, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
     return await rerank(question, docs, top_n=5)
-
-
-MAX_TOOL_STEPS = 3  # ponytail: 天气类1次够, 留余量防多工具过度调用
-
-
-async def _dispatch_tool(name: str, args: dict, retriever=None,
-                         tenant_id: str = "default", kb_ids=None) -> str:
-    """工具名→执行函数分发. 未知工具返回提示串(不抛)."""
-    if name == "search_knowledge_base":
-        from src.retrieval.reranker import rerank
-        from src.storage.protocol import RetrievalFilter
-        q = args.get("query", "")
-        docs = await retriever.retrieve(q, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
-        docs = await rerank(q, docs, top_n=3)
-        return "\n".join(f"- {d.content[:150]}" for d in docs) or "(无结果)"
-    if name == "get_weather":
-        return await get_weather(args.get("city", ""))
-    if name == "calculate":
-        return calculate(args.get("expression", ""))
-    if name == "web_search":
-        return await web_search(args.get("query", ""))
-    if name == "get_time":
-        return get_time()
-    return f"(未知工具: {name})"
-
-
-async def run_tool_agent(retriever, question: str, tenant_id: str = "default",
-                         kb_ids: list[str] | None = None, history: list | None = None) -> dict:
-    """带工具的ReAct闭环(含KB检索+外部工具): LLM自主调工具收集信息, 流式生成回答.
-    调过工具→source=tool; 没调(纯常识兜底)→source=fallback_unverified.
-    ponytail: function-calling不可用→回退常识兜底, 不阻塞主流程."""
-    from langgraph.config import get_stream_writer
-    from src.agents.prompts import TOOL_AGENT_PROMPT, OPEN_ANSWER_FALLBACK_PROMPT
-    try:
-        from src.agents.graph import _stream_answer  # ponytail: 延迟import避免循环(graph import tools)
-    except Exception:
-        _stream_answer = None
-    try:
-        writer = get_stream_writer()
-    except Exception:
-        writer = None
-
-    messages = [{"role": "system", "content": TOOL_AGENT_PROMPT}, {"role": "user", "content": question}]
-    used_tool = False
-    try:
-        for _ in range(MAX_TOOL_STEPS):
-            msg = await chat_message(messages, tools=REACT_TOOLS)
-            tool_calls = msg.get("tool_calls")
-            if not tool_calls:
-                break  # LLM判定无需工具, 退出走常识
-            messages.append(msg)
-            for tc in tool_calls:
-                args = json.loads(tc["function"]["arguments"])
-                result = await _dispatch_tool(tc["function"]["name"], args, retriever, tenant_id, kb_ids)
-                used_tool = True
-                if writer:
-                    try:
-                        writer({"tag": "tool_call", "name": tc["function"]["name"], "args": args, "result": result})
-                    except Exception:
-                        pass
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-        # 统一流式生成最终回答(始终打字机效果)
-        messages.append({"role": "user", "content": "请基于上述信息(工具结果或常识)用自然语言简明回答我的问题。"})
-        if _stream_answer:
-            ans = await _stream_answer(messages)
-        else:
-            from src.agents.llm import chat
-            ans = await chat(messages)
-        return {"generation": ans, "source": "tool" if used_tool else "fallback_unverified"}
-    except Exception:
-        # ponytail: function-calling端点不支持/解析失败 → 回退常识兜底
-        ans = ""
-        if _stream_answer:
-            ans = await _stream_answer([{"role": "user", "content": OPEN_ANSWER_FALLBACK_PROMPT.format(question=question)}])
-        return {"generation": ans, "source": "fallback_unverified"}
 
 
 MAX_PLAN_STEPS = 4  # ponytail: 多源组合通常2-4步
@@ -420,3 +337,110 @@ if __name__ == "__main__":
     s = get_time()
     assert "周" in s and len(s) > 15, f"get_time 输出异常: {s}"
     print(f"get_time ok: {s}")
+
+
+# ponytail: ===== LangChain 1.0 create_agent 迁移(取代手写 run_tool_agent) =====
+
+
+class ToolAuditMiddleware(AgentMiddleware):
+    """after_model hook: 审计LLM发起的每次工具调用(记录日志, 预留接langfuse)。
+    ponytail: 前端可观测(thought/tool_call事件)在run_react_agent的streaming里做, 此处专注审计。"""
+    def after_model(self, state) -> dict | None:
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        for tc in (getattr(last, "tool_calls", None) or []):
+            log.info("tool_call", name=tc.get("name"), args=tc.get("args"))
+        return None
+
+
+_react_agent = None
+
+
+def get_react_agent():
+    """构建并缓存 create_agent(create_agent + SummarizationMiddleware + ToolAuditMiddleware)。
+    ponytail: 全局单例; per-request上下文(retriever/tenant/kb_ids)经 config.configurable 注入 search_kb_tool。"""
+    global _react_agent
+    if _react_agent is not None:
+        return _react_agent
+    import os
+    from dotenv import load_dotenv
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import SummarizationMiddleware
+    from langchain_openai import ChatOpenAI
+    from src.agents.prompts import TOOL_AGENT_PROMPT
+    load_dotenv()
+    llm = ChatOpenAI(model=os.getenv("LITELLM_MODEL", "gpt-4o-mini"),
+                     base_url=os.getenv("LITELLM_BASE_URL", ""),
+                     api_key=os.getenv("LITELLM_API_KEY", ""), temperature=0)
+    _react_agent = create_agent(
+        model=llm,
+        tools=REACT_AGENT_TOOLS,
+        middleware=[
+            # ponytail: 长对话超阈值自动汇总(当前多轮只截最近几条, 这是真实缺口)
+            SummarizationMiddleware(model=llm, max_tokens_before_summary=4000, messages_to_keep=10),
+            ToolAuditMiddleware(),
+        ],
+        system_prompt=TOOL_AGENT_PROMPT,
+    )
+    return _react_agent
+
+
+async def run_react_agent(retriever, question: str, tenant_id: str = "default",
+                          kb_ids: list[str] | None = None, history: list | None = None) -> dict:
+    """create_agent 驱动的 ReAct 闭环: astream 流式, 映射前端 thought/tool_call/token 事件, 末尾判 source。
+    调过工具→source=tool; 没调(纯常识)→fallback_unverified。
+    ponytail: 复杂度集中在streaming映射(messages→token打字机, updates→tool_call展示)。"""
+    from langchain_core.messages import ToolMessage
+    agent = get_react_agent()
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+    # 拼 messages: 历史 + 当前问题(create_agent 多轮靠messages历史)
+    msgs = []
+    for h in (history or [])[-5:]:
+        msgs.append({"role": "user", "content": h.get("question", "")})
+        msgs.append({"role": "assistant", "content": h.get("answer", "")})
+    msgs.append({"role": "user", "content": question})
+    configurable = {"retriever": retriever, "tenant_id": tenant_id, "kb_ids": kb_ids}
+
+    final_text, used_tool = "", False
+    async for mode, chunk in agent.astream(
+        {"messages": msgs}, config={"configurable": configurable}, stream_mode=["messages", "updates"]
+    ):
+        if mode == "messages":
+            msg_chunk, metadata = chunk
+            # ponytail: 只model节点(LLM)的token做打字机, 排除tools节点ToolMessage content
+            if (metadata or {}).get("langgraph_node") == "model":
+                content = getattr(msg_chunk, "content", None)
+                if content:
+                    final_text += content
+                    if writer:
+                        try:
+                            writer({"tag": "token", "text": content})
+                        except Exception:
+                            pass
+        elif mode == "updates":
+            for node, upd in (chunk or {}).items():
+                for m in ((upd or {}).get("messages") or []):
+                    if node == "model":
+                        tcs = getattr(m, "tool_calls", None) or []
+                        for tc in tcs:
+                            if writer:
+                                try:
+                                    writer({"tag": "tool_call", "name": tc.get("name"),
+                                            "args": tc.get("args", {}), "result": "(执行中)"})
+                                except Exception:
+                                    pass
+                        # 兜底: 最终回答(model无tool_calls的AIMessage)覆盖final_text, 比token累加更稳
+                        if not tcs and getattr(m, "content", None):
+                            final_text = m.content
+                    elif node == "tools" and isinstance(m, ToolMessage):
+                        used_tool = True
+                        if writer:
+                            try:
+                                writer({"tag": "tool_call", "name": getattr(m, "name", "tool"),
+                                        "args": {}, "result": str(m.content)[:300]})
+                            except Exception:
+                                pass
+    return {"generation": final_text or "(无回答)", "source": "tool" if used_tool else "fallback_unverified"}

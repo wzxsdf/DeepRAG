@@ -12,6 +12,7 @@ from src.agents.llm import chat, chat_json, chat_stream
 from src.agents.prompts import (GRADER_BATCH_PROMPT, GENERATOR_PROMPT, VERIFIER_PROMPT, REWRITE_PROMPT,
     CHITCHAT_PROMPT, OPEN_ANSWER_FALLBACK_PROMPT, AGENT_COMPLEX_JUDGE_PROMPT)
 from src.storage.protocol import RetrievedDocument
+from src.core.logging import log
 
 MAX_RETRY = 2  # ponytail: 自纠最大轮数, 兜底防死循环
 
@@ -26,7 +27,7 @@ def _timed(node: str):
                 return await fn(*a, **kw)
             finally:
                 ms = (time.perf_counter() - t0) * 1000
-                print(f"[trace] {node}: {ms:.0f}ms", flush=True)
+                log.info("trace", node=node, ms=round(ms))
         return wrapper
     return deco
 
@@ -175,12 +176,12 @@ async def _reply_direct_node(state: AgentState) -> dict:
 
 def _tool_agent_node(retriever):
     async def _tool_agent(state: AgentState) -> dict:
-        """带工具的Agent(quick + agent常态共用): 获取信息后流式作答. source=tool|fallback_unverified."""
-        from src.agents.tools import run_tool_agent
-        res = await run_tool_agent(retriever, state["question"],
-                                   tenant_id=state.get("tenant_id", "default"),
-                                   kb_ids=state.get("kb_ids") or None,
-                                   history=state.get("conversation_history"))
+        """带工具的ReAct Agent(quick + agent常态共用): create_agent驱动. source=tool|fallback_unverified."""
+        from src.agents.tools import run_react_agent
+        res = await run_react_agent(retriever, state["question"],
+                                    tenant_id=state.get("tenant_id", "default"),
+                                    kb_ids=state.get("kb_ids") or None,
+                                    history=state.get("conversation_history"))
         return {"generation": res["generation"], "source": res["source"]}
     return _tool_agent
 

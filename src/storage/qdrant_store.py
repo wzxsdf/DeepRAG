@@ -10,6 +10,8 @@ from qdrant_client.models import (
 )
 from qdrant_client.hybrid.fusion import reciprocal_rank_fusion
 
+from src.core.config import QdrantCfg
+
 
 # ponytail: 服务端是http, host无scheme时qdrant_client默认https会SSL:WRONG_VERSION_NUMBER
 def _normalize_host(host: str) -> str:
@@ -19,7 +21,9 @@ def _normalize_host(host: str) -> str:
 
 
 class QdrantWriter:
-    def __init__(self, host: str = "http://localhost", port: int = 6333, api_key: str = ""):
+    def __init__(self, cfg: QdrantCfg | None = None, host: str = "http://localhost", port: int = 6333, api_key: str = ""):
+        if cfg is not None:  # ponytail: cfg注入(阶段1), 旧kwargs向后兼容
+            host, port, api_key = cfg.host, cfg.port, cfg.api_key
         self.client = QdrantClient(url=f"{_normalize_host(host)}:{port}", api_key=api_key or None)
         self.collection_name = "chunks"
 
