@@ -51,6 +51,7 @@ async def test_full_ingestion_real_embedding():
     print(f"\n[2] 创建文档记录...")
     try:
         from src.storage.mysql import MySQLStore
+        from src.storage.repositories import DocumentVersionRepository, IndexingJobRepository
         mysql = MySQLStore(
             host=os.getenv("MYSQL_HOST"),
             port=int(os.getenv("MYSQL_PORT")),
@@ -61,8 +62,8 @@ async def test_full_ingestion_real_embedding():
         await mysql.connect()
 
         await mysql.execute("INSERT INTO documents (id, title) VALUES (%s, %s)", document_id, "完整测试文档")
-        await mysql.create_document_version(version_id, document_id, oss_key, len(test_pdf), sha256)
-        await mysql.create_indexing_job(job_id, version_id)
+        await DocumentVersionRepository(mysql).create(version_id, document_id, oss_key, len(test_pdf), sha256)
+        await IndexingJobRepository(mysql).create(job_id, version_id)
         await mysql.close()
         print(f"  ✓ 文档记录创建成功")
     except Exception as e:
@@ -147,6 +148,7 @@ async def test_full_ingestion_real_embedding():
     print(f"\n[6] 写入MySQL chunks...")
     try:
         from src.storage.mysql import MySQLStore
+        from src.storage.repositories import ChunkRepository
         mysql = MySQLStore(
             host=os.getenv("MYSQL_HOST"),
             port=int(os.getenv("MYSQL_PORT")),
@@ -162,7 +164,7 @@ async def test_full_ingestion_real_embedding():
 
             heading_path_str = json.dumps([])
 
-            await mysql.insert_chunk(
+            await ChunkRepository(mysql).insert(
                 chunk_id=chunk["id"],
                 version_id=version_id,
                 parent_id=chunk["parent_id"],

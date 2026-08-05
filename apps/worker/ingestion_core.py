@@ -120,6 +120,7 @@ async def index_chunks_to_qdrant(version_id: str, parsed_key: str, kb_id: str = 
     from src.storage.oss import OssStore
     from src.storage.qdrant_store import QdrantWriter
     from src.storage.mysql import MySQLStore
+    from src.storage.repositories import ChunkRepository
 
     # 读解析产物
     oss_store = OssStore(
@@ -175,6 +176,7 @@ async def index_chunks_to_qdrant(version_id: str, parsed_key: str, kb_id: str = 
         password=os.getenv("MYSQL_PASSWORD"),
     )
     await mysql_store.connect()
+    chunk_repo = ChunkRepository(mysql_store)
 
     # ponytail: W3.2 父块单独落OSS(per parent_id), 供检索parent expansion
     seen_parents = set()
@@ -192,7 +194,7 @@ async def index_chunks_to_qdrant(version_id: str, parsed_key: str, kb_id: str = 
         import json
         heading_path_str = json.dumps([])
 
-        await mysql_store.insert_chunk(
+        await chunk_repo.insert(
             chunk_id=chunk["id"],
             version_id=version_id,
             parent_id=chunk["parent_id"],

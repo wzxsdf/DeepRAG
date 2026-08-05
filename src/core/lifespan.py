@@ -12,6 +12,8 @@ from src.storage.qdrant_store import QdrantWriter
 from src.storage.oss import OssStore
 from src.retrieval.hybrid import HybridRetriever
 from src.agents.graph import build_graph
+from src.core.llm import ModelGateway, get_gateway
+from src.storage.repositories import UserRepository, ConversationRepository
 
 
 @dataclass
@@ -21,6 +23,7 @@ class AppResources:
     mysql: MySQLStore      # 共享连接池(不再每端点 connect/close)
     qdrant: QdrantWriter
     oss: OssStore
+    gateway: ModelGateway  # 统一LLM入口(实例=get_gateway()单例, 与agents/llm.py同源; langfuse trace)
     retriever: HybridRetriever
     graph: Any             # compiled langgraph
 
@@ -31,12 +34,16 @@ async def lifespan(app: FastAPI):
     s = get_settings()
     mysql = MySQLStore(cfg=s.mysql_cfg)
     await mysql.connect()
+    # ponytail: 阶段4 — 启动收敛运行时DDL(users补name/password_hash列 + conversation_messages建表), 替代路由每次_ensure_*
+    await UserRepository(mysql).ensure_schema()
+    await ConversationRepository(mysql).ensure_schema()
     qdrant = QdrantWriter(cfg=s.qdrant_cfg)
     oss = OssStore(cfg=s.oss_cfg)
+    gateway = get_gateway()  # ponytail: 阶段2 — 启动触发ModelGateway初始化(缓存预热+langfuse handler+日志), 与agents/llm.py共用单例
     # ponytail: 阶段5 — retriever注入共享实例(不再retriever内重复new)
     retriever = HybridRetriever(qdrant=qdrant, oss=oss, mysql=mysql, settings=s)
     app.state.resources = AppResources(
-        settings=s, mysql=mysql, qdrant=qdrant, oss=oss,
+        settings=s, mysql=mysql, qdrant=qdrant, oss=oss, gateway=gateway,
         retriever=retriever, graph=build_graph(retriever),
     )
     yield

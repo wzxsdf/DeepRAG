@@ -32,6 +32,13 @@ class OSSCfg:
     access_key_secret: str = ""
 
 
+@dataclass
+class ProviderCfg:
+    # ponytail: provider连接信息; 由 providers property 从扁平env派生, 加新provider=加字段+映射
+    api_key: str = ""
+    base_url: str = ""
+
+
 class Settings(BaseSettings):
     """全局配置(从 .env 加载). 替代散落各处的 os.getenv。"""
 
@@ -60,7 +67,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
-    # --- LLM 现有扁平key(阶段1 llm.py/embedder.py 仍读这些) ---
+    # --- LLM 扁平key(chat走litellm/juaiapi, embed/rerank走embedding/siliconflow; 存储类+ModelGateway共用) ---
     litellm_base_url: str = ""
     litellm_api_key: str = ""
     litellm_model: str = "gpt-4o-mini"
@@ -70,12 +77,15 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1024
     tavily_api_key: str = ""
 
-    # --- LLM purpose路由(阶段2 ModelGateway启用, init_chat_model 解析 "provider:model") ---
-    chat_generate_model: str = "openai:gpt-4o"        # CRAG生成(强)
-    chat_fast_model: str = "openai:gpt-4o-mini"       # grade/route/judge(快省)
-    chat_reason_model: str = "openai:gpt-4o"          # plan规划(推理)
-    embed_provider_model: str = "siliconflow:BAAI/bge-m3"
-    rerank_model: str = "bge-reranker-v2-m3"
+    # --- LLM purpose路由(阶段2 ModelGateway); 空→回退 openai:{litellm_model} 兼容现有单端点 ---
+    chat_generate_model: str = ""   # CRAG生成(强); 配 "provider:model" 启用多模型路由
+    chat_fast_model: str = ""       # grade/judge/rewrite(快省)
+    chat_reason_model: str = ""     # plan规划(推理)
+
+    # --- Langfuse(LLM trace, 阶段2接ModelGateway); 三key齐全即启用 ---
+    langfuse_host: str = ""
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
 
     @property
     def mysql_cfg(self) -> MySQLCfg:
@@ -91,6 +101,18 @@ class Settings(BaseSettings):
     def oss_cfg(self) -> OSSCfg:
         return OSSCfg(endpoint=self.oss_endpoint, bucket=self.oss_bucket,
                       access_key_id=self.oss_access_key_id, access_key_secret=self.oss_access_key_secret)
+
+    @property
+    def providers(self) -> dict[str, ProviderCfg]:
+        """provider前缀→连接信息. ponytail: 从扁平字段派生(零.env迁移); 加新provider=加env字段+此处映射."""
+        return {
+            "openai": ProviderCfg(api_key=self.litellm_api_key, base_url=self.litellm_base_url),
+            "siliconflow": ProviderCfg(api_key=self.embedding_api_key, base_url=self.embedding_base_url),
+        }
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        return bool(self.langfuse_host and self.langfuse_public_key and self.langfuse_secret_key)
 
 
 _settings: Settings | None = None
@@ -108,6 +130,6 @@ if __name__ == "__main__":  # ponytail: 配置加载自检(minimal runnable chec
     s = get_settings()
     assert s.mysql_cfg.port == 3306
     assert s.qdrant_cfg.host  # scheme由QdrantWriter._normalize_host补, settings只载配置
-    assert s.chat_fast_model and s.litellm_model
+    assert s.litellm_model and s.providers["openai"].base_url
     print(f"settings ok: mysql={s.mysql_cfg.host}:{s.mysql_cfg.port}/{s.mysql_cfg.db} "
-          f"qdrant={s.qdrant_cfg.host} llm_fast={s.chat_fast_model}")
+          f"qdrant={s.qdrant_cfg.host} llm={s.litellm_model} langfuse={s.langfuse_enabled}")

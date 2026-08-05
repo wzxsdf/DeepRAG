@@ -1,30 +1,15 @@
 # ponytail: Agent工具层 - search_knowledge_base工具 + ReAct多轮检索
 # LLM自主决定调用检索(可多次, 自拟查询), OpenAI function-calling原生实现, 不引入langchain
 
-import json
 import ast
 import math
 from langgraph.config import get_stream_writer
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from langchain.agents.middleware import AgentMiddleware
-from src.agents.llm import chat_message
 from src.retrieval.reranker import rerank
 from src.storage.protocol import RetrievalFilter
 from src.core.logging import log
-
-SEARCH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "search_knowledge_base",
-        "description": "在知识库检索与查询相关的文档片段。需要查找事实证据时调用,可多次调用不同查询(分解子问题/换说法)以提升召回。",
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "检索查询(关键词或问句)"}},
-            "required": ["query"],
-        },
-    },
-}
 
 # ponytail: WMO weather_code→中文, 只列常见码, 未列出回落"未知"
 _WMO_CN = {0: "晴", 1: "晴", 2: "多云", 3: "阴", 45: "雾", 48: "雾",
@@ -187,67 +172,8 @@ def time_tool() -> str:
 REACT_AGENT_TOOLS = [search_kb_tool, weather_tool, calc_tool, web_search_tool, time_tool]
 
 
-async def run_search_agent(retriever, question: str, tenant_id: str = "default",
-                           hints: list[str] | None = None, kb_ids: list[str] | None = None,
-                           max_searches: int = 4):
-    """ReAct工具调用检索: LLM自主调用search收集证据, 去重融合后rerank. 失败回退单次检索.
-
-    max_searches: 搜索总次数硬上限(跨回合累计; 一回合可发多个tool_call). 适当保留多跳能力, 防过度召回.
-    hints: route给出的建议子查询(作为初始线索, 可None).
-    kb_ids: 限定检索的知识库列表(None=不限).
-    返回: list[RetrievedDocument] (已rerank).
-    """
-    sys_msg = ("你是检索Agent。用 search_knowledge_base 工具收集足够证据来回答问题。"
-               "通常 2-3 次搜索即可覆盖要点, 证据充分就停止, 不要为追求召回而重复或过度搜索。"
-               "每次工具返回证据摘要后, 判断是否还需补充。收集充分后回复一句中文小结(不要直接答题)。")
-    if hints:
-        sys_msg += f"\n建议优先尝试的子查询: {json.dumps(hints, ensure_ascii=False)}"
-    messages = [{"role": "system", "content": sys_msg}, {"role": "user", "content": question}]
-
-    # ponytail: 取流式writer(非流式上下文如eval的ainvoke下为no-op, 不影响), 用于向前端推送检索推理
-    try:
-        writer = get_stream_writer()
-    except Exception:
-        writer = None
-
-    acc: dict[str, object] = {}  # chunk_id -> doc, 去重保留最高分
-    searches = 0  # ponytail: 已发起搜索次数(跨回合累计), 到max_searches即停, 防过度召回(原仅限回合数不限tool_call数→实测6次)
-    try:
-        while searches < max_searches:
-            msg = await chat_message(messages, tools=[SEARCH_TOOL])
-            tool_calls = msg.get("tool_calls")
-            if not tool_calls:
-                break  # Agent判定证据充分, 退出循环
-            messages.append(msg)
-            for tc in tool_calls:
-                if searches >= max_searches:
-                    break  # 到达搜索上限, 停止本轮剩余tool_call
-                q = json.loads(tc["function"]["arguments"]).get("query", question)
-                docs = await retriever.retrieve(q, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
-                searches += 1
-                for d in docs:
-                    if d.chunk_id not in acc or d.score > acc[d.chunk_id].score:
-                        acc[d.chunk_id] = d
-                # 推送思考事件: Agent检索了什么query、找到几条、摘要(豆包式推理过程展示)
-                if writer:
-                    try:
-                        writer({"tag": "search", "query": q, "found": len(docs),
-                                "snippets": [d.content[:80] for d in docs[:3]]})
-                    except Exception:
-                        pass
-                # ponytail: 只回喂内容摘要(前120字), 避免context爆炸; Agent据摘要决定是否续检
-                snippet = "\n".join(f"- {d.content[:120]}" for d in docs[:3]) or "(无结果)"
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": snippet})
-    except Exception as e:
-        # ponytail: 工具调用不可用(端点不支持tools/解析失败) → 回退单次检索, 不阻塞主流程
-        log.warning("search_agent 回退单次检索", error=type(e).__name__, msg=str(e))
-        docs = await retriever.retrieve(question, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
-        return await rerank(question, docs, top_n=5)
-
-    docs = list(acc.values())
-    if not docs:  # Agent未触发任何search → 兜底用原问题检索一次
-        docs = await retriever.retrieve(question, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
-    return await rerank(question, docs, top_n=5)
+# ponytail: run_search_agent 已删 — mode路由后 plan_agent 走 _exec_plan_step 直接检索,
+# 此 OpenAI function-calling ReAct 检索路径成死代码(chat_message/SEARCH_TOOL 同删). KB ReAct 检索能力由 search_kb_tool(create_agent)覆盖
 
 
 MAX_PLAN_STEPS = 4  # ponytail: 多源组合通常2-4步
@@ -362,16 +288,11 @@ def get_react_agent():
     global _react_agent
     if _react_agent is not None:
         return _react_agent
-    import os
-    from dotenv import load_dotenv
     from langchain.agents import create_agent
     from langchain.agents.middleware import SummarizationMiddleware
-    from langchain_openai import ChatOpenAI
     from src.agents.prompts import TOOL_AGENT_PROMPT
-    load_dotenv()
-    llm = ChatOpenAI(model=os.getenv("LITELLM_MODEL", "gpt-4o-mini"),
-                     base_url=os.getenv("LITELLM_BASE_URL", ""),
-                     api_key=os.getenv("LITELLM_API_KEY", ""), temperature=0)
+    from src.core.llm import get_gateway
+    llm = get_gateway().chat_model("fast")  # ponytail: 统一经ModelGateway, 与CRAG同源+langfuse trace
     _react_agent = create_agent(
         model=llm,
         tools=REACT_AGENT_TOOLS,

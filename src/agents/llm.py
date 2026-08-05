@@ -1,89 +1,44 @@
-# ponytail: LLM封装, httpx直连juaiapi(OpenAI兼容), 不引入langchain
+# ponytail: LLM封装 — 经ModelGateway(init_chat_model→BaseChatModel), httpx直连退役, langfuse自动trace
+# 保持 chat/chat_json/chat_stream 函数签名不变(graph.py/tools.py零改); 死代码chat_message随run_search_agent已删
+# temperature参数保留兼容签名但gateway固定0(所有调用方均用默认0); purpose: chat_stream→generate, chat/json→fast
 
-import os
 import json
 import re
-import asyncio
-import httpx
-from dotenv import load_dotenv
 
-load_dotenv()
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-_CHAT_URL = os.getenv("LITELLM_BASE_URL", "") + "/chat/completions"
-_CHAT_HEADERS = {"Authorization": f"Bearer {os.getenv('LITELLM_API_KEY', '')}", "Content-Type": "application/json"}
-_MODEL = os.getenv("LITELLM_MODEL", "gpt-4o-mini")
+from src.core.llm import get_gateway
+
+_ROLE_MSG = {"system": SystemMessage, "user": HumanMessage, "assistant": AIMessage}
 
 
-async def _post(payload: dict) -> dict:
-    """POST chat completions 带重试. 5xx(503等瞬时服务端错误)重试, 4xx(参数/不支持)不重试直接抛."""
-    last = None
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=90) as c:
-                r = await c.post(_CHAT_URL, headers=_CHAT_HEADERS, json=payload)
-            r.raise_for_status()
-            return r.json()
-        except httpx.HTTPStatusError as e:
-            if 500 <= e.response.status_code < 600 and attempt < 2:
-                last = e
-                await asyncio.sleep(1.5 * (attempt + 1))  # ponytail: 5xx瞬时, 重试
-                continue
-            raise  # 4xx或不支持的功能(response_format/tools)直接抛, 上层fallback
-        except Exception as e:
-            last = e
-            if attempt < 2:
-                await asyncio.sleep(1.5 * (attempt + 1))
-    raise last
-
-
-async def _call(messages: list[dict], temperature: float = 0.0, json_mode: bool = False) -> str:
-    payload = {"model": _MODEL, "messages": messages, "temperature": temperature}
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
-    return (await _post(payload))["choices"][0]["message"]["content"]
-
-
-async def chat_message(messages: list[dict], tools: list[dict] | None = None,
-                       temperature: float = 0.0) -> dict:
-    """调用LLM返回原始assistant message(含content或tool_calls). 供Agent工具调用循环使用."""
-    payload = {"model": _MODEL, "messages": messages, "temperature": temperature}
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
-    return (await _post(payload))["choices"][0]["message"]
+def _to_lc(messages: list[dict]) -> list:
+    """OpenAI风格 dict messages → LangChain Message. 支持system/user/assistant(调用方只用这三类)."""
+    return [_ROLE_MSG.get(m["role"], HumanMessage)(content=m["content"]) for m in messages]
 
 
 async def chat_stream(messages: list[dict], temperature: float = 0.0):
-    """流式chat, yield文本delta. 供生成节点逐字推送(SSE token事件). 无重试, 失败由调用方兜底."""
-    payload = {"model": _MODEL, "messages": messages, "temperature": temperature, "stream": True}
-    async with httpx.AsyncClient(timeout=120) as c:
-        async with c.stream("POST", _CHAT_URL, headers=_CHAT_HEADERS, json=payload) as r:
-            r.raise_for_status()
-            async for line in r.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    delta = json.loads(data)["choices"][0]["delta"].get("content")
-                except Exception:
-                    continue
-                if delta:
-                    yield delta
+    """流式chat, yield文本delta. 供生成节点逐字推送(SSE token事件). 走generate purpose(强模型)."""
+    m = get_gateway().chat_model("generate")
+    async for chunk in m.astream(_to_lc(messages)):
+        if chunk.content:
+            yield chunk.content
 
 
 async def chat(messages: list[dict], temperature: float = 0.0) -> str:
-    """OpenAI兼容chat, 返回content文本."""
-    return await _call(messages, temperature, json_mode=False)
+    """OpenAI兼容chat, 返回content文本. 走fast purpose(rewrite/兜底, 轻量)."""
+    r = await get_gateway().chat_model("fast").ainvoke(_to_lc(messages))
+    return r.content
 
 
 async def chat_json(messages: list[dict], temperature: float = 0.0) -> dict:
-    """要求JSON输出. 先试response_format, 不支持则回退普通chat+正则解析."""
+    """要求JSON输出. 先试response_format(json_object), 不支持/失败则回退普通chat+正则解析. 走fast purpose."""
+    gw = get_gateway()
     try:
-        return _parse_json(await _call(messages, temperature, json_mode=True))
+        mj = gw.chat_model("fast").bind(response_format={"type": "json_object"})
+        return _parse_json((await mj.ainvoke(_to_lc(messages))).content)
     except Exception:
-        return _parse_json(await _call(messages, temperature, json_mode=False))
+        return _parse_json((await gw.chat_model("fast").ainvoke(_to_lc(messages))).content)
 
 
 def _parse_json(content: str) -> dict:
@@ -94,3 +49,15 @@ def _parse_json(content: str) -> dict:
         if m:
             content = m.group(1).strip()
     return json.loads(content)
+
+
+if __name__ == "__main__":  # ponytail: 自检 — chat/chat_json/chat_stream 三路径走gateway
+    import asyncio
+
+    async def t():
+        print("chat:", (await chat([{"role": "user", "content": "只回复:好"}]))[:20])
+        print("chat_json:", await chat_json([{"role": "user", "content": '返回JSON {"ok":true}'}]))
+        toks = [x async for x in chat_stream([{"role": "user", "content": "数1到3"}])]
+        print("stream:", "".join(toks)[:20])
+
+    asyncio.run(t())

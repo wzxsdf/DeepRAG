@@ -56,7 +56,7 @@ query ──► query_text(原文)    ──► sparse(BM25 输入)
 - 仅老数据（payload 无 content）才回查 MySQL 再拉 OSS
 - **parent 上下文**：收集 `parent_id`，`asyncio.gather` 并发拉 OSS `parent_chunks/{pid}.txt`，写入 `parent_content`
 
-> 💡 每次检索独立新建 `MySQLStore`，避免多跳 `asyncio.gather` 共享连接池的 close 竞争。
+> 💡 HybridRetriever 经 lifespan **构造注入**共享 MySQLStore（阶段 5），内部 lazy connect，不再每次检索新建连接。
 
 ### 2.3 检索过滤
 
@@ -139,16 +139,20 @@ retrieve → grade → generate → verify ─(不达标)─→ rewrite → retr
 
 **生成质量**：`Faith / Cite` 双指标在 CRAG 路径下稳定为 1.0，得益于"generate 强制 [n] + verify 双校验 + MAX_RETRY 自纠"闭环。
 
-## 五、simple vs complex 分流
+## 五、kb 模式检索节点
 
-**`_retrieve_node`** (`graph.py:121-136`) 按 `complexity` 分流：
+**`_retrieve_node`** (`graph.py`)：kb 模式固定**单次检索 + rerank**（mode 路由后删除了 simple/complex 分流与 ReAct 多跳检索）：
 
-| 类型 | 触发 | 流程 | 说明 |
-|---|---|---|---|
-| **simple** | `complexity=="simple"`（kb_simple） | 单次 `retrieve` + `rerank(top_n=5)` | 跳过 ReAct agent，省 ≥1 次 LLM；单事实问题一次检索够 |
-| **complex** | `complexity=="complex"`（kb_complex） | `run_search_agent`（ReAct 多跳） | LLM 自主多次调 `search_knowledge_base`，分解子查询/换说法 |
+```python
+async def _retrieve(state):
+    docs = await retriever.retrieve(state["query"], RetrievalFilter(tenant_id, kb_ids), top_k=5)
+    return {"documents": await rerank(state["query"], docs, top_n=5)}
+```
 
-`run_search_agent` (`src/agents/tools.py`)：带 `max_searches=4` 硬上限（跨回合累计），Agent 据证据摘要决定是否续检，去重融合后 rerank。
+- 多跳 / 多源需求由 **agent 模式的 `plan_agent`**（规划 + 逐步执行）覆盖，不再在检索节点内做 ReAct
+- 复杂多步问答用户选 agent 模式；kb 模式专注单次严谨检索 + CRAG 自纠
+
+> 💡 旧的 `run_search_agent`（ReAct 多跳检索）已删——mode 路由后该路径零调用（plan_agent 的 KB 步骤走 `_exec_plan_step` 直接检索）。生成/校验的 LLM 调用经 ModelGateway（`chat_stream`/`chat_json`，阶段 2）。
 
 ## 六、数据结构
 

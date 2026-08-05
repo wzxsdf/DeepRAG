@@ -1,5 +1,4 @@
-# ponytail: 文档上传/确认/列表/状态/删除. 删除=软删documents+物理清理Qdrant/OSS/子表(跨存储一致性)
-# 阶段3: 存储经Depends注入共享resources, 不再模块级new+每端点connect/close
+# ponytail: 文档上传/确认/列表/状态/删除. 删除=软删documents+物理清理Qdrant/OSS/子表(跨存储一致性). 经Repository
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
 import uuid
@@ -8,6 +7,8 @@ import os
 from src.storage.oss import OssStore
 from src.storage.mysql import MySQLStore
 from src.storage.qdrant_store import QdrantWriter
+from src.storage.repositories import (KBRepository, DocumentRepository,
+    DocumentVersionRepository, IndexingJobRepository, ChunkRepository)
 from src.security.auth import get_current_user
 from src.core.lifespan import get_mysql, get_oss, get_qdrant
 
@@ -18,20 +19,23 @@ async def purge_document(document_id: str, user_id: str, mysql: MySQLStore, oss:
     """物理清理单个文档全部数据 + 软删 documents 行. 供 DELETE /documents 与 DELETE /kbs 复用(DRY).
     顺序: Qdrant(隔离检索)→OSS(释放空间)→MySQL(子表物理删+主表软删). 幂等(删已删无副作用).
     mysql/oss/qdrant 由调用方经 Depends 注入(共享池)."""
-    vids = await mysql.get_version_ids(document_id)
+    version_repo = DocumentVersionRepository(mysql)
+    doc_repo = DocumentRepository(mysql)
+    chunk_repo = ChunkRepository(mysql)
+    vids = await version_repo.get_ids(document_id)
     # 1. Qdrant 按version删 — 检索立即不再命中(RAG软删关键)
     for vid in vids:
         await qdrant.delete_by_version(vid)
     # 2. OSS — 原文(oss_key) + parsed/{vid}/ + chunks/{vid}/ + parent_chunks/{pid}
-    for key in await mysql.get_version_oss_keys(document_id):
+    for key in await version_repo.get_oss_keys(document_id):
         await oss.delete(key)
     for vid in vids:
         await oss.delete_by_prefix(f"parsed/{vid}/")
         await oss.delete_by_prefix(f"chunks/{vid}/")
-    for pid in await mysql.get_chunk_parent_ids(vids):
+    for pid in await chunk_repo.get_parent_ids(vids):
         await oss.delete(f"parent_chunks/{pid}.txt")
-    # 3. MySQL — chunks/indexing_jobs/document_versions 物理删 + documents 软删(审计)
-    await mysql.delete_document_data(document_id, user_id)
+    # 3. MySQL — chunks/indexing_jobs/document_versions 物理删 + documents 软删(事务级联)
+    await doc_repo.purge_with_versions(document_id, vids, user_id)
 
 
 class PresignRequest(BaseModel):
@@ -82,16 +86,14 @@ async def confirm_upload(req: ConfirmUploadRequest, background_tasks: Background
     version_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
     # ponytail: 并发保护 — KB正在删除/已删除则拒绝上传(409)
-    kb = await mysql.get_kb(req.kb_id)
+    kb = await KBRepository(mysql).get(req.kb_id)
     if not kb:
         raise HTTPException(404, "知识库不存在")
-    if kb.get("status") in ("DELETING", "DELETED"):
+    if kb.status in ("DELETING", "DELETED"):
         raise HTTPException(409, "知识库正在删除或已删除, 无法上传")
-    await mysql.execute("INSERT IGNORE INTO knowledge_bases (id, tenant_id, name) VALUES ('default', 'default', 'Default KB')")
-    await mysql.execute("INSERT INTO documents (id, kb_id, title) VALUES (%s, %s, %s)", document_id, req.kb_id, req.title)
-    await mysql.create_document_version(version_id=version_id, document_id=document_id,
-        oss_key=req.oss_key, file_size=req.file_size, sha256=req.sha256)
-    await mysql.create_indexing_job(job_id, version_id)
+    await DocumentRepository(mysql).create(document_id, req.kb_id, req.title)
+    await DocumentVersionRepository(mysql).create(version_id, document_id, req.oss_key, req.file_size, req.sha256)
+    await IndexingJobRepository(mysql).create(job_id, version_id)
     from apps.worker.ingestion import ingest_document
     # ponytail: 传document_id入库→写Qdrant payload真document_id(修原document_id=version_id的bug)
     background_tasks.add_task(ingest_document, version_id, req.oss_key, req.kb_id, document_id)
@@ -102,48 +104,30 @@ async def confirm_upload(req: ConfirmUploadRequest, background_tasks: Background
 async def list_documents(kb_id: str | None = None, _=Depends(get_current_user),
                          mysql: MySQLStore = Depends(get_mysql)):
     """文档列表(含入库状态, 过滤已软删). 可按kb_id过滤. join documents+versions+jobs."""
-    sql = """SELECT d.id, d.title, d.kb_id, dv.status AS version_status, j.stage, j.status AS job_status, d.created_at
-             FROM documents d
-             LEFT JOIN document_versions dv ON dv.document_id = d.id
-             LEFT JOIN indexing_jobs j ON j.version_id = dv.id
-             WHERE d.deleted_at IS NULL"""
-    if kb_id:
-        rows = await mysql.fetch(sql + " AND d.kb_id = %s ORDER BY d.created_at DESC LIMIT 100", kb_id)
-    else:
-        rows = await mysql.fetch(sql + " ORDER BY d.created_at DESC LIMIT 100")
-    return [{"id": r["id"], "title": r["title"], "kb_id": r["kb_id"],
-             "status": r["version_status"] or r["job_status"] or "UNKNOWN",
-             "stage": r["stage"], "created_at": str(r["created_at"])} for r in rows]
+    docs = await DocumentRepository(mysql).list_active(kb_id)
+    return [{"id": d.id, "title": d.title, "kb_id": d.kb_id, "status": d.status,
+             "stage": d.stage, "created_at": str(d.created_at)} for d in docs]
 
 
 @router.get("/documents/{document_id}/preview")
 async def preview_document(document_id: str, mysql: MySQLStore = Depends(get_mysql),
                            oss: OssStore = Depends(get_oss)):
     """返回原文PDF的presigned GET URL, 供前端在线预览."""
-    row = await mysql.fetchrow(
-        "SELECT oss_key FROM document_versions WHERE document_id=%s ORDER BY created_at DESC LIMIT 1",
-        document_id)
-    if not row or not row.get("oss_key"):
+    oss_key = await DocumentVersionRepository(mysql).latest_oss_key(document_id)
+    if not oss_key:
         raise HTTPException(404, "文档原文未找到")
-    url = await oss.presign_get(row["oss_key"], expires=3600)
+    url = await oss.presign_get(oss_key, expires=3600)
     return {"url": url}
 
 
 @router.get("/documents/{document_id}")
 async def get_document(document_id: str, mysql: MySQLStore = Depends(get_mysql)):
     """查询文档状态(过滤已软删)."""
-    row = await mysql.fetchrow("""
-        SELECT d.id, d.title, dv.status AS version_status, dv.id AS version_id, j.stage, j.status AS job_status, j.error_msg
-        FROM documents d
-        LEFT JOIN document_versions dv ON dv.document_id = d.id
-        LEFT JOIN indexing_jobs j ON j.version_id = dv.id
-        WHERE d.id = %s AND d.deleted_at IS NULL
-    """, document_id)
-    if not row:
+    d = await DocumentRepository(mysql).get_detail(document_id)
+    if not d:
         raise HTTPException(404, "文档不存在")
-    return {"document_id": row["id"], "title": row["title"], "version_id": row["version_id"],
-            "status": row["version_status"] or row["job_status"] or "UNKNOWN",
-            "stage": row["stage"], "error_msg": row["error_msg"]}
+    return {"document_id": d.document_id, "title": d.title, "version_id": d.version_id,
+            "status": d.status, "stage": d.stage, "error_msg": d.error_msg}
 
 
 @router.delete("/documents/{document_id}")
@@ -152,7 +136,8 @@ async def delete_document(document_id: str, user=Depends(get_current_user),
                           oss: OssStore = Depends(get_oss),
                           qdrant: QdrantWriter = Depends(get_qdrant)):
     """删除文档: 软删documents(审计) + 物理清理Qdrant/OSS/MySQL子表. 幂等(已删返回DELETED)."""
-    row = await mysql.fetchrow("SELECT deleted_at FROM documents WHERE id=%s", document_id)
+    doc_repo = DocumentRepository(mysql)
+    row = await doc_repo.find_for_delete(document_id)
     if not row:
         raise HTTPException(404, "文档不存在")
     if row.get("deleted_at"):

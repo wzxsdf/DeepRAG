@@ -1,5 +1,4 @@
-# ponytail: /query + /query/stream(SSE Agent节点进度流) + 多轮持久化(带user_id)
-# 阶段3: graph/mysql经Depends注入共享resources(lifespan建), 不再全局懒单例
+# ponytail: /query + /query/stream(SSE Agent节点进度流) + 多轮持久化(带user_id). 经Repository
 import json
 import uuid
 from fastapi import APIRouter, Depends
@@ -7,44 +6,31 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from src.storage.mysql import MySQLStore
+from src.storage.repositories import ConversationRepository
 from src.security.auth import oauth2_scheme, decode_token
 from src.core.lifespan import get_graph, get_mysql
 
 router = APIRouter(prefix="/api/v1", tags=["query"])
 
 
-async def _ensure_conv_table(mysql):
-    await mysql.execute("""CREATE TABLE IF NOT EXISTS conversation_messages (
-        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        conversation_id VARCHAR(64) NOT NULL,
-        user_id VARCHAR(50) DEFAULT 'default',
-        role VARCHAR(16) NOT NULL,
-        content TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_conv (conversation_id),
-        INDEX idx_user (user_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
-    cols = {c["Field"] for c in await mysql.fetch("SHOW COLUMNS FROM conversation_messages")}
-    if "user_id" not in cols:  # ponytail: 老表补user_id列
-        await mysql.execute("ALTER TABLE conversation_messages ADD COLUMN user_id VARCHAR(50) DEFAULT 'default'")
-
-
 async def _load_history(mysql, conv_id):
-    rows = await mysql.fetch("SELECT role, content FROM conversation_messages WHERE conversation_id=%s ORDER BY id", conv_id)
+    # ponytail: 取原始消息→重组为[{question,answer}]对(供CRAG多轮理解指代). 建表已由lifespan ensure_schema
+    msgs = await ConversationRepository(mysql).load_history(conv_id)
     history, last_user = [], None
-    for r in rows:
-        if r["role"] == "user":
-            last_user = r["content"]
-        elif r["role"] == "assistant" and last_user:
-            history.append({"question": last_user, "answer": r["content"]})
+    for m in msgs:
+        if m.role == "user":
+            last_user = m.content
+        elif m.role == "assistant" and last_user:
+            history.append({"question": last_user, "answer": m.content})
             last_user = None
     return history
 
 
-async def _save_message(mysql, conv_id, role, content, user_id="default"):
-    await mysql.execute(
-        "INSERT INTO conversation_messages (conversation_id, user_id, role, content) VALUES (%s, %s, %s, %s)",
-        conv_id, user_id, role, content)
+async def _persist(mysql, conv_id, user_id, question, ans):
+    # ponytail: 共享池不再connect/close; 落用户问+助手答两条
+    repo = ConversationRepository(mysql)
+    await repo.save_message(conv_id, user_id, "user", question)
+    await repo.save_message(conv_id, user_id, "assistant", ans)
 
 
 def _user_id_from_token(token):
@@ -74,12 +60,6 @@ class QueryResponse(BaseModel):
     grounded: bool
     conversation_id: str
     source: str  # 答案来源: kb_grounded/non_kb/open_qa/fallback_unverified/refused
-
-
-async def _persist(mysql, conv_id, user_id, question, ans):
-    # ponytail: 共享池不再connect/close
-    await _save_message(mysql, conv_id, "user", question, user_id)
-    await _save_message(mysql, conv_id, "assistant", ans, user_id)
 
 
 def _step_detail(node: str, update: dict) -> dict:
@@ -121,7 +101,6 @@ async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
                 graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql)):
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = _user_id_from_token(token)
-    await _ensure_conv_table(mysql)
     history = await _load_history(mysql, conv_id)
 
     cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
@@ -151,7 +130,6 @@ async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_sch
     """SSE流式: 推送Agent各节点进度(step事件) + 最终done事件(answer+citations). 非token级(LLM非流), 展示Agent流程."""
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = _user_id_from_token(token)
-    await _ensure_conv_table(mysql)
     history = await _load_history(mysql, conv_id)
     cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
 

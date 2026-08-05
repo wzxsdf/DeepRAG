@@ -32,13 +32,14 @@ async def main():
     # 1.5 创建 document+version(模拟confirm, 满足 chunks 外键)
     import hashlib
     from src.storage.mysql import MySQLStore
+    from src.storage.repositories import DocumentVersionRepository
     mysql = MySQLStore(host=os.getenv("MYSQL_HOST"), port=int(os.getenv("MYSQL_PORT")),
                        db=os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "deeprag")),
                        user=os.getenv("MYSQL_USER"), password=os.getenv("MYSQL_PASSWORD"))
     doc_id = str(uuid.uuid4())
     await mysql.connect()
     await mysql.execute("INSERT INTO documents (id, title) VALUES (%s, %s)", doc_id, "test_doc")
-    await mysql.create_document_version(version_id, doc_id, oss_key, len(pdf_data), hashlib.sha256(pdf_data).hexdigest())
+    await DocumentVersionRepository(mysql).create(version_id, doc_id, oss_key, len(pdf_data), hashlib.sha256(pdf_data).hexdigest())
     await mysql.close()
 
     # 2. PyMuPDF解析

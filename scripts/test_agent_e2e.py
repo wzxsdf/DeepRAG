@@ -12,6 +12,7 @@ load_dotenv()
 
 from src.storage.qdrant_store import QdrantWriter
 from src.storage.mysql import MySQLStore
+from src.storage.repositories import DocumentVersionRepository, ChunkRepository
 from src.storage.oss import OssStore
 from src.retrieval.embedder import embed_query
 from src.retrieval.hybrid import HybridRetriever
@@ -40,7 +41,7 @@ async def ingest():
 
     await mysql.connect()
     await mysql.execute("INSERT INTO documents (id, title) VALUES (%s, %s)", doc_id, "DeepRAG知识库")
-    await mysql.create_document_version(ver_id, doc_id, "raw/test.pdf", 1024, hashlib.sha256(b"test").hexdigest())
+    await DocumentVersionRepository(mysql).create(ver_id, doc_id, "raw/test.pdf", 1024, hashlib.sha256(b"test").hexdigest())
 
     chunks = []
     for i, content in enumerate(KB):
@@ -48,7 +49,7 @@ async def ingest():
         dense = await embed_query(content)
         oss_key = f"chunks/{ver_id}/{cid}.txt"
         await oss.put(oss_key, content.encode())
-        await mysql.insert_chunk(cid, ver_id, ver_id, i + 1, "[]", hashlib.sha256(content.encode()).hexdigest(), oss_key)
+        await ChunkRepository(mysql).insert(cid, ver_id, ver_id, i + 1, "[]", hashlib.sha256(content.encode()).hexdigest(), oss_key)
         chunks.append({"id": cid, "dense_vector": dense, "sparse_text": content,
                        "payload": {"tenant_id": "default", "kb_id": "default", "document_id": doc_id,
                                    "version_id": ver_id, "parent_id": ver_id, "page": i + 1, "heading_path": [],

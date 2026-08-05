@@ -8,17 +8,17 @@ load_dotenv()
 
 
 async def _update_status(version_id, version_status, job_status=None, error=None):
-    """更新 document_versions + indexing_jobs 状态."""
+    """更新 document_versions + indexing_jobs 状态(经Repository)."""
     from src.storage.mysql import MySQLStore
+    from src.storage.repositories import DocumentVersionRepository, IndexingJobRepository
     mysql = MySQLStore(host=os.getenv("MYSQL_HOST"), port=int(os.getenv("MYSQL_PORT")),
                        db=os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "deeprag")),
                        user=os.getenv("MYSQL_USER"), password=os.getenv("MYSQL_PASSWORD"))
     await mysql.connect()
     try:
-        await mysql.execute("UPDATE document_versions SET status=%s WHERE id=%s", version_status, version_id)
+        await DocumentVersionRepository(mysql).update_status(version_id, version_status)
         if job_status:
-            await mysql.execute("UPDATE indexing_jobs SET status=%s, error_msg=%s WHERE version_id=%s",
-                                job_status, error, version_id)
+            await IndexingJobRepository(mysql).update_by_version(version_id, job_status, error)
     finally:
         await mysql.close()
 

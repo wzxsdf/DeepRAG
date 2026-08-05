@@ -1,9 +1,11 @@
-# ponytail: 监控接口 - 入库job统计/文档chunk会话计数/依赖健康(用共享resources)
+# ponytail: 监控接口 - 入库job统计/文档chunk会话计数/依赖健康; 计数经Repository(删内联SQL)
 from fastapi import APIRouter, Depends
 
 from src.storage.mysql import MySQLStore
 from src.storage.qdrant_store import QdrantWriter
 from src.storage.oss import OssStore
+from src.storage.repositories import (IndexingJobRepository, DocumentRepository,
+    ChunkRepository, ConversationRepository)
 from src.security.auth import get_current_user
 from src.core.lifespan import get_mysql, get_qdrant, get_oss
 
@@ -17,12 +19,11 @@ async def metrics(user: dict = Depends(get_current_user),
                   oss: OssStore = Depends(get_oss)):
     jobs, doc_count, chunk_count, conv_count, msg_count = {}, 0, 0, 0, 0
     try:
-        for r in await mysql.fetch("SELECT status, COUNT(*) AS c FROM indexing_jobs GROUP BY status"):
-            jobs[r["status"]] = r["c"]
-        doc_count = (await mysql.fetchrow("SELECT COUNT(*) AS c FROM documents"))["c"]
-        chunk_count = (await mysql.fetchrow("SELECT COUNT(*) AS c FROM chunks"))["c"]
-        conv_count = (await mysql.fetchrow("SELECT COUNT(DISTINCT conversation_id) AS c FROM conversation_messages"))["c"]
-        msg_count = (await mysql.fetchrow("SELECT COUNT(*) AS c FROM conversation_messages"))["c"]
+        jobs = await IndexingJobRepository(mysql).count_by_status()
+        doc_count = await DocumentRepository(mysql).count()
+        chunk_count = await ChunkRepository(mysql).count()
+        conv_count = await ConversationRepository(mysql).count_distinct_conversations()
+        msg_count = await ConversationRepository(mysql).count_messages()
     except Exception:
         pass  # ponytail: conversation_messages表可能未建(无对话时)
 
