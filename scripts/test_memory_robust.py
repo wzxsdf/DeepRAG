@@ -52,7 +52,7 @@ async def main():
     before = len(facts)
     await fact.upsert(TEST_USER, "password", "mySecret123")     # key敏感词
     await fact.upsert(TEST_USER, "api_key", "abc")              # key敏感词
-    long_token = "sk-abcdef1234567890ABCDEFabcdef1234567890AB"  # 41字符无空格高熵
+    long_token = "fakeTestToken123456789abcdef0123456789ABCDEFabcdef01"  # 假值(非真实key), 测试value启发式(>32无空格高熵)
     await fact.upsert(TEST_USER, "note", long_token)            # value像token
     facts2 = await fact.get_all(TEST_USER)
     print(f"[after敏感写入] {facts2}")
