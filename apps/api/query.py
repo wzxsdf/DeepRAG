@@ -1,6 +1,7 @@
 # ponytail: /query + /query/stream(SSE Agent节点进度流) + 多轮持久化(带user_id). 经Repository
 import json
 import uuid
+import asyncio
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -8,7 +9,9 @@ from sse_starlette.sse import EventSourceResponse
 from src.storage.mysql import MySQLStore
 from src.storage.repositories import ConversationRepository
 from src.security.auth import oauth2_scheme, decode_token
-from src.core.lifespan import get_graph, get_mysql
+from src.core.lifespan import get_graph, get_mysql, get_memory_manager, get_memory_queue
+from src.core.logging import log
+from src.cache import get_hybrid_cache
 
 router = APIRouter(prefix="/api/v1", tags=["query"])
 
@@ -24,6 +27,31 @@ async def _load_history(mysql, conv_id):
             history.append({"question": last_user, "answer": m.content})
             last_user = None
     return history
+
+
+async def _manage_history(memory_manager, history):
+    """短期记忆治理(即插即用): 治理权在此收敛, 下游 graph/agent 只消费返回值。
+
+    - memory_manager 启用: 超预算时旧历史压成摘要 + 保留近期原文(P0 主方案)。
+    - memory_manager 为 None(未启用): 轻量窗口兜底(最近8轮), 防 graph 爆 token。
+    """
+    if not history:
+        return history
+    if memory_manager is None:
+        return history[-8:]  # ponytail: 未启用治理 — 保守窗口兜底
+    managed = await memory_manager.manage(history)
+    return managed.to_history_list()
+
+
+def _schedule_memory_write(memory_queue, user_id: str, question: str, answer: str, source: str):
+    """A1 写闭环: 入持久化队列(替代create_task, 防崩溃丢记忆)。
+
+    memory_queue 为 None(未启用)则跳过。同步 INSERT(快, ms级), 后台 worker 异步消费。
+    持久化保证: 进程崩溃重启后, pending 项继续被消费 → writer.write。
+    """
+    if memory_queue is None or not answer:
+        return
+    asyncio.create_task(memory_queue.enqueue(user_id, question, answer, source))
 
 
 async def _persist(mysql, conv_id, user_id, question, ans):
@@ -98,40 +126,76 @@ def _step_detail(node: str, update: dict) -> dict:
 
 @router.post("/query", response_model=QueryResponse)
 async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
-                graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql)):
+                graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql),
+                memory_manager=Depends(get_memory_manager),
+                memory_queue=Depends(get_memory_queue)):
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = _user_id_from_token(token)
-    history = await _load_history(mysql, conv_id)
+    history = await _manage_history(memory_manager, await _load_history(mysql, conv_id))
 
-    cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    # ponytail: 缓存检查 - 先尝试从缓存获取结果(仅非多轮的首问走缓存, 多轮带conversation_id不缓存)
+    cache = get_hybrid_cache()
+    cache_filters = {
+        "tenant_id": req.tenant_id,
+        "kb_ids": req.kb_ids or [],
+        "mode": req.mode
+    }
+    if not req.conversation_id:  # ponytail: 多轮对话不缓存(上下文相关, 缓存易错)
+        cached_result = await cache.get_query_result(req.question, cache_filters, req.mode)
+        if cached_result:
+            log.info("query_cache_hit", question=req.question[:50] + "...")
+            return QueryResponse(
+                answer=cached_result.get("answer", ""),
+                citations=cached_result.get("citations", []),
+                retry_count=cached_result.get("retry_count", 0),
+                grounded=cached_result.get("grounded", False),
+                conversation_id=conv_id,
+                source=cached_result.get("source", "cached")
+            )
+
+    # ponytail: P0 checkpoint修复 — thread_id 复用 conversation_id(旧: 每请求新uuid致MemorySaver形同虚设)
+    cfg = {"configurable": {"thread_id": conv_id}}
     await graph.ainvoke(
         {"question": req.question, "query": req.question, "tenant_id": req.tenant_id,
          "retry_count": 0, "documents": [], "search_decision": "", "generation": "", "verification": None,
          "conversation_history": history, "kb_ids": req.kb_ids or [], "intent": "", "source": "",
-         "mode": req.mode, "safety": "allow"}, config=cfg)
+         "mode": req.mode, "safety": "allow", "user_id": user_id, "memory_context": ""}, config=cfg)
     values = (await graph.aget_state(config=cfg)).values
     await _persist(mysql, conv_id, user_id, req.question, values.get("generation", ""))
 
     docs = values.get("documents", [])
     ver = values.get("verification") or {}
-    return QueryResponse(
-        answer=values.get("generation", ""),
-        citations=[Citation(chunk_id=d.chunk_id, document_id=d.document_id, page=d.locator.get("page", 0)) for d in docs],
-        retry_count=values.get("retry_count", 0),
-        grounded=bool(ver.get("grounded")),
-        conversation_id=conv_id,
-        source=values.get("source", ""),
-    )
+    # A1 写闭环: 入持久化队列(后台worker消费, 防崩溃丢记忆)
+    _schedule_memory_write(memory_queue, user_id, req.question,
+                           values.get("generation", ""), values.get("source", ""))
+
+    # 构造响应数据
+    response_data = {
+        "answer": values.get("generation", ""),
+        "citations": [{"chunk_id": d.chunk_id, "document_id": d.document_id, "page": d.locator.get("page", 0)} for d in docs],
+        "retry_count": values.get("retry_count", 0),
+        "grounded": bool(ver.get("grounded")),
+        "conversation_id": conv_id,
+        "source": values.get("source", "")
+    }
+
+    # ponytail: 异步缓存结果 - 不阻塞响应(仅单轮缓存)
+    if not req.conversation_id:
+        asyncio.create_task(cache.set_query_result(req.question, response_data, cache_filters, req.mode))
+
+    return QueryResponse(**response_data)
 
 
 @router.post("/query/stream")
 async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
-                       graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql)):
+                       graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql),
+                       memory_manager=Depends(get_memory_manager),
+                       memory_queue=Depends(get_memory_queue)):
     """SSE流式: 推送Agent各节点进度(step事件) + 最终done事件(answer+citations). 非token级(LLM非流), 展示Agent流程."""
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = _user_id_from_token(token)
-    history = await _load_history(mysql, conv_id)
-    cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    history = await _manage_history(memory_manager, await _load_history(mysql, conv_id))
+    cfg = {"configurable": {"thread_id": conv_id}}  # ponytail: P0 checkpoint修复 — 复用conversation_id
 
     async def event_gen():
         # ponytail: 多模式流 — updates(节点中间结果→step事件) + custom(Agent检索推理→thought事件)
@@ -139,7 +203,7 @@ async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_sch
             {"question": req.question, "query": req.question, "tenant_id": req.tenant_id,
              "retry_count": 0, "documents": [], "search_decision": "", "generation": "", "verification": None,
              "conversation_history": history, "kb_ids": req.kb_ids or [], "intent": "", "source": "",
-             "mode": req.mode, "safety": "allow"},
+             "mode": req.mode, "safety": "allow", "user_id": user_id, "memory_context": ""},
             config=cfg, stream_mode=["updates", "custom"]):
             if mode == "custom":
                 # ponytail: tag==token 的custom事件(生成器逐字)走独立token事件, 其余(Agent检索)走thought
@@ -152,6 +216,9 @@ async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_sch
         await _persist(mysql, conv_id, user_id, req.question, values.get("generation", ""))
         docs = values.get("documents", [])
         ver = values.get("verification") or {}
+        # A1 写闭环: 入持久化队列(后台worker消费)
+        _schedule_memory_write(memory_queue, user_id, req.question,
+                               values.get("generation", ""), values.get("source", ""))
         yield {"event": "done", "data": json.dumps({
             "answer": values.get("generation", ""),
             "citations": [{"chunk_id": d.chunk_id, "document_id": d.document_id, "page": d.locator.get("page", 0)} for d in docs],

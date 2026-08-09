@@ -87,6 +87,32 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
 
+    # --- Redis(记忆模块+缓存系统, 阶段W4) ---
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str = ""
+    redis_db: int = 0  # ponytail: 记忆db0/查询缓存db1/文档缓存db2, 实例级单URL按用途分库
+
+    # --- 短期记忆治理(P0, 即插即用) ---
+    memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)
+    memory_max_context_tokens: int = 2000    # 历史占用token预算; 超过才触发摘要+窗口
+    memory_keep_recent_turns: int = 4        # 触发压缩时, 近期保留的原文轮数
+    memory_enable_summary: bool = True       # 是否启用LLM摘要; False=超预算时仅硬截断(纯窗口)
+
+    # --- 长期记忆(P1, 即插即用) ---
+    memory_long_term_enabled: bool = True    # 长期记忆读闭环开关; False=不建agent_memory, _entry_node跳过检索
+
+    # --- 实体记忆 + 写闭环(P2, 即插即用) ---
+    memory_auto_write: bool = True           # 写闭环开关; False=不沉淀记忆(query.py跳过writer)
+    memory_write_interval: int = 5           # A1 写队列worker轮询间隔秒; 0=不启动worker(仅入队不消费)
+
+    # --- 记忆整合(P3, 即插即用) ---
+    memory_consolidate_interval: int = 0     # 后台整合间隔秒; 0=不启用后台定时(API手动触发); 如86400=每日
+    memory_dedup_threshold: float = 0.88     # 去重相似度阈值; BGE-M3中文短文本cosine偏低, 0.92过严(实测几乎不触发)
+    memory_decay_lambda: float = 0.05        # 时间衰减系数 exp(-λ×天); 0.05≈14天半衰, 大者衰减更快
+    memory_max_per_user: int = 0             # E1 单用户记忆上限(0=不限); 超限LRU淘汰(access_count低+老)
+    memory_context_max_chars: int = 500      # E3 注入prompt的memory_context最大字符(防token膨胀)
+
     @property
     def mysql_cfg(self) -> MySQLCfg:
         return MySQLCfg(host=self.mysql_host, port=self.mysql_port,
@@ -114,6 +140,23 @@ class Settings(BaseSettings):
     def langfuse_enabled(self) -> bool:
         return bool(self.langfuse_host and self.langfuse_public_key and self.langfuse_secret_key)
 
+    @property
+    def redis_url(self) -> str:
+        """Redis连接URL. ponytail: 按用途分库(db0记忆/db1查询缓存/db2文档缓存), 密码可选."""
+        auth = f":{self.redis_password}@" if self.redis_password else ""
+        return f"redis://{auth}{self.redis_host}:{self.redis_port}"
+
+    @property
+    def memory_config(self):
+        """短期记忆治理配置(P0). ponytail: 懒导入避免core循环依赖memory."""
+        from src.memory.short_term import MemoryConfig
+        return MemoryConfig(
+            enabled=self.memory_enabled,
+            max_context_tokens=self.memory_max_context_tokens,
+            keep_recent_turns=self.memory_keep_recent_turns,
+            enable_summary=self.memory_enable_summary,
+        )
+
 
 _settings: Settings | None = None
 
@@ -132,4 +175,5 @@ if __name__ == "__main__":  # ponytail: 配置加载自检(minimal runnable chec
     assert s.qdrant_cfg.host  # scheme由QdrantWriter._normalize_host补, settings只载配置
     assert s.litellm_model and s.providers["openai"].base_url
     print(f"settings ok: mysql={s.mysql_cfg.host}:{s.mysql_cfg.port}/{s.mysql_cfg.db} "
-          f"qdrant={s.qdrant_cfg.host} llm={s.litellm_model} langfuse={s.langfuse_enabled}")
+          f"qdrant={s.qdrant_cfg.host} llm={s.litellm_model} langfuse={s.langfuse_enabled} "
+          f"redis={s.redis_url}")

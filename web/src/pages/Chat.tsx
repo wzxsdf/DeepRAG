@@ -1,12 +1,14 @@
+// 聊天页面 - 整合新的ChatInterface和现有功能
+
 import { useState, useRef, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { toast } from "sonner"
 import { Plus, Send, Sparkles, Loader2, Quote, CheckCircle2, AlertCircle, MessageSquare, RefreshCw, Brain, Search, ChevronDown, Compass, Filter, PenLine, ShieldCheck, Library, Wrench, GitBranch, Zap } from "lucide-react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
+import ChatInterface from "@/components/ChatInterface"
 import { chatApi, streamQuery, type StepEvent, type ThoughtEvent } from "@/api/chat"
 import { kbApi } from "@/api/kb"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
@@ -15,6 +17,7 @@ interface Citation {
   document_id: string
   page: number
 }
+
 interface Msg {
   role: "user" | "assistant"
   content: string
@@ -26,12 +29,10 @@ interface Msg {
   source?: string
 }
 
-// ponytail: 思考轨迹 = 节点中间结果(step) + Agent检索推理(thought), 按到达时序展示
 type TraceItem =
   | ({ kind: "step" } & StepEvent)
   | ({ kind: "thought" } & ThoughtEvent)
 
-// 节点→图标(标题由后端_step_detail给出, 前端只映射图标)
 const STEP_ICON: Record<string, typeof Search> = {
   entry: Compass,
   retrieve: Search,
@@ -43,10 +44,6 @@ const STEP_ICON: Record<string, typeof Search> = {
   plan_agent: GitBranch,
 }
 
-const mapLast = (m: Msg[], fn: (last: Msg) => Msg): Msg[] =>
-  m.length ? [...m.slice(0, -1), fn(m[m.length - 1])] : m
-
-// ponytail: 来源徽章(4色) — kb_grounded绿/non_kb白/open_qa+fallback黄/refused红; 透明分层是vs通用LLM的差异化
 const SOURCE_META: Record<string, { label: string; variant: "success" | "secondary" | "warning" | "destructive" | "info" | "planned"; icon: typeof CheckCircle2 }> = {
   kb_grounded: { label: "知识库·已引用", variant: "success", icon: CheckCircle2 },
   non_kb: { label: "非知识库", variant: "secondary", icon: MessageSquare },
@@ -56,6 +53,7 @@ const SOURCE_META: Record<string, { label: string; variant: "success" | "seconda
   planned: { label: "多源·编排", variant: "planned", icon: GitBranch },
   refused: { label: "无法回答", variant: "destructive", icon: AlertCircle },
 }
+
 const SUGGEST = [
   "DeepRAG的检索层用了什么技术?",
   "对比LangGraph和LlamaIndex",
@@ -63,6 +61,7 @@ const SUGGEST = [
 ]
 
 type ChatMode = "quick" | "kb" | "agent"
+
 const MODE_META: Record<ChatMode, { label: string; icon: typeof Search }> = {
   quick: { label: "快速问答", icon: Zap },
   kb: { label: "知识库", icon: Library },
@@ -71,12 +70,24 @@ const MODE_META: Record<ChatMode, { label: string; icon: typeof Search }> = {
 
 export default function Chat() {
   const qc = useQueryClient()
+  const [useNewUI, setUseNewUI] = useState(true) // 新UI开关
+
+  // 如果使用新UI，直接返回ChatInterface组件
+  if (useNewUI) {
+    return (
+      <div className="flex h-full">
+        <ChatInterface />
+      </div>
+    )
+  }
+
+  // 否则使用原有UI（保持向后兼容）
   const [conv, setConv] = useState<string | null>(null)
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState("")
   const [streaming, setStreaming] = useState(false)
-  const [openCite, setOpenCite] = useState<string | null>(null) // ponytail: 展开的引用键 `${msgIdx}-${citeIdx}`
-  const [selectedKbs, setSelectedKbs] = useState<string[]>([]) // 选中的知识库(空=全部)
+  const [openCite, setOpenCite] = useState<string | null>(null)
+  const [selectedKbs, setSelectedKbs] = useState<string[]>([])
   const [kbOpen, setKbOpen] = useState(false)
   const [mode, setMode] = useState<ChatMode>(
     () => (localStorage.getItem("chat-mode") as ChatMode) || "quick"
@@ -230,7 +241,6 @@ export default function Chat() {
                         )}
                       </div>
                     )}
-                    {/* ponytail: 来源徽章(4色) — 历史消息无source则由grounded推断 */}
                     {m.role === "assistant" && !m.streaming && m.content &&
                       (() => {
                         const src = m.source || (m.grounded ? "kb_grounded" : "non_kb")
@@ -272,7 +282,6 @@ export default function Chat() {
                           })}
                         </div>
                         {(() => {
-                          // ponytail: 当前消息展开的引用详情
                           const openJ = openCite && openCite.startsWith(`${i}-`) ? Number(openCite.split("-")[1]) : null
                           const oc = openJ !== null ? m.citations?.[openJ] : null
                           return (
@@ -356,16 +365,27 @@ export default function Chat() {
               </div>
             </div>
             <div className="flex gap-2">
-              <Input
+              <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()}
                 placeholder="输入问题, Enter 发送..."
                 disabled={streaming}
+                className="flex-1 px-4 py-2.5 rounded-lg border bg-background focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
               />
               <Button variant="gradient" size="icon" onClick={() => send()} disabled={streaming || !input.trim()}>
                 {streaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
               </Button>
+            </div>
+
+            {/* UI切换按钮 */}
+            <div className="mt-2 flex items-center justify-center">
+              <button
+                onClick={() => setUseNewUI(!useNewUI)}
+                className="text-xs text-blue-600 hover:text-blue-800 underline"
+              >
+                {useNewUI ? "切换到经典界面" : "切换到新界面"}
+              </button>
             </div>
           </div>
         </div>
@@ -374,7 +394,7 @@ export default function Chat() {
   )
 }
 
-// 可折叠"思考过程"面板: 节点中间结果(step) + Agent检索推理(thought), 按时序展开(豆包式)
+// 思考轨迹组件
 function ThinkingTrace({ trace, streaming }: { trace: TraceItem[]; streaming?: boolean }) {
   const [open, setOpen] = useState(true)
   return (
