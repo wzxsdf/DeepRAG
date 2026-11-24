@@ -9,7 +9,7 @@ from src.storage.qdrant_store import QdrantWriter
 from src.storage.mysql import MySQLStore
 from src.storage.oss import OssStore
 from src.retrieval.embedder import embed_query
-from src.core.config import Settings, get_settings
+from src.core.config import get_settings
 
 load_dotenv()
 
@@ -24,10 +24,38 @@ class HybridRetriever:
         self.oss = oss or OssStore(cfg=self._settings.oss_cfg)
         self._mysql_store = mysql or MySQLStore(cfg=self._settings.mysql_cfg)
 
+    async def _resolve_active_version_ids(
+        self,
+        tenant_id: str,
+        kb_ids: list[str] | None,
+    ) -> list[str] | None:
+        """从元数据解析活动版本，旧评估数据无元数据时保持兼容."""
+        try:
+            from src.storage.repositories import DocumentRepository
+
+            if self._mysql_store.pool is None:
+                await self._mysql_store.connect()
+            version_ids = await DocumentRepository(self._mysql_store).get_active_version_ids(
+                tenant_id, kb_ids)
+            return version_ids
+        except Exception as e:
+            from src.core.logging import log
+            log.warning("active_version_resolution_skipped", error=type(e).__name__, msg=str(e))
+            return None
+
     async def retrieve(self, query: str, filters: RetrievalFilter, top_k: int) -> List[RetrievedDocument]:
         dense = await embed_query(query)
+        active_version_ids = filters.active_version_ids
+        if not filters.active_version_id and active_version_ids is None:
+            active_version_ids = await self._resolve_active_version_ids(
+                filters.tenant_id, filters.kb_ids)
+        if filters.active_version_id:
+            active_version_ids = None
         res = await self.qdrant.query_hybrid_async(
-            dense_vec=dense, query_text=query, tenant_id=filters.tenant_id, kb_ids=filters.kb_ids, limit=top_k,
+            dense_vec=dense, query_text=query, tenant_id=filters.tenant_id, kb_ids=filters.kb_ids,
+            limit=top_k, acl_tags=filters.acl_tags,
+            active_version_id=filters.active_version_id,
+            active_version_ids=active_version_ids,
         )
 
         # ponytail: content优先取Qdrant payload(零IO); 仅老数据(无content payload)才查MySQL回拉OSS。

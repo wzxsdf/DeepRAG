@@ -66,7 +66,8 @@ async def delete_kb(kb_id: str, user=Depends(get_current_user),
     await repo.set_status(kb_id, "DELETING")  # 置DELETING — confirm上传会校验status拒绝(并发保护)
     doc_ids = await repo.list_document_ids(kb_id)
     for doc_id in doc_ids:
-        await purge_document(doc_id, user["user_id"], mysql, oss, qdrant)
+        await purge_document(doc_id, user["user_id"], mysql, oss, qdrant,
+                             user.get("tenant_id", "default"))
     await qdrant.delete_by_kb(kb_id)  # 按 kb_id 兜底一次清(防逐version遗漏, 含历史脏数据)
     await repo.soft_delete(kb_id, user["user_id"])
     return {"id": kb_id, "status": "DELETED", "documents_removed": len(doc_ids)}

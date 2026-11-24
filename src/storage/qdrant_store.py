@@ -27,6 +27,30 @@ class QdrantWriter:
         self.client = QdrantClient(url=f"{_normalize_host(host)}:{port}", api_key=api_key or None)
         self.collection_name = "chunks"
 
+    @staticmethod
+    def _build_filter(
+        tenant_id: str,
+        kb_ids: List[str] | None = None,
+        acl_tags: List[str] | None = None,
+        active_version_id: str | None = None,
+        active_version_ids: List[str] | None = None,
+    ) -> Filter:
+        """构造 dense/sparse 共用的召回前过滤条件."""
+        must = [FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))]
+        if kb_ids:
+            must.append(FieldCondition(key="kb_id", match=MatchAny(any=kb_ids)))
+        if acl_tags:
+            # 文档必须包含用户拥有的每个标签，避免 MatchAny 放宽权限边界。
+            must.extend(FieldCondition(key="acl_tags", match=MatchValue(value=tag)) for tag in acl_tags)
+        if active_version_id:
+            must.append(FieldCondition(key="version_id", match=MatchValue(value=active_version_id)))
+        elif active_version_ids is not None:
+            if not active_version_ids:
+                must.append(FieldCondition(key="version_id", match=MatchValue(value="__no_active_version__")))
+            else:
+                must.append(FieldCondition(key="version_id", match=MatchAny(any=active_version_ids)))
+        return Filter(must=must)
+
     def ensure_collection(self):
         if not self.client.collection_exists(self.collection_name):
             self.client.create_collection(
@@ -55,13 +79,12 @@ class QdrantWriter:
         self.client.upsert(collection_name=self.collection_name, points=points)
 
     def query_hybrid(self, dense_vec: List[float], query_text: str,
-                     tenant_id: str = "default", kb_ids: List[str] | None = None, limit: int = 10):
-        """hybrid检索: 分别查dense/sparse, 客户端加权RRF(dense主导). 返回list[ScoredPoint]. 同步(MVP单查询可忍).
-        kb_ids: 多KB过滤(MatchAny); None=不限KB."""
-        must = [FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))]
-        if kb_ids:
-            must.append(FieldCondition(key="kb_id", match=MatchAny(any=kb_ids)))
-        query_filter = Filter(must=must)
+                     tenant_id: str = "default", kb_ids: List[str] | None = None, limit: int = 10,
+                     acl_tags: List[str] | None = None, active_version_id: str | None = None,
+                     active_version_ids: List[str] | None = None):
+        """hybrid检索: dense+sparse并使用同一组召回前过滤条件."""
+        query_filter = self._build_filter(
+            tenant_id, kb_ids, acl_tags, active_version_id, active_version_ids)
         dense_res = self.client.query_points(self.collection_name, query=dense_vec, using="dense",
             query_filter=query_filter, limit=limit * 3, with_payload=True)
         sparse_res = self.client.query_points(self.collection_name,
@@ -72,13 +95,12 @@ class QdrantWriter:
                                        limit=limit, weights=[0.65, 0.35])
 
     async def query_hybrid_async(self, dense_vec: List[float], query_text: str,
-                                 tenant_id: str = "default", kb_ids: List[str] | None = None, limit: int = 10):
-        """async版hybrid: 并发查dense+sparse(to_thread不阻塞event loop), 保留客户端加权RRF(dense主导)。
-        同步query_hybrid保留给eval。"""
-        must = [FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))]
-        if kb_ids:
-            must.append(FieldCondition(key="kb_id", match=MatchAny(any=kb_ids)))
-        query_filter = Filter(must=must)
+                                 tenant_id: str = "default", kb_ids: List[str] | None = None, limit: int = 10,
+                                 acl_tags: List[str] | None = None, active_version_id: str | None = None,
+                                 active_version_ids: List[str] | None = None):
+        """async版hybrid: dense/sparse并发查询，共用召回前过滤条件."""
+        query_filter = self._build_filter(
+            tenant_id, kb_ids, acl_tags, active_version_id, active_version_ids)
         dense_res, sparse_res = await asyncio.gather(
             asyncio.to_thread(self.client.query_points, self.collection_name, query=dense_vec, using="dense",
                               query_filter=query_filter, limit=limit * 3, with_payload=True),

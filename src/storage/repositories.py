@@ -3,8 +3,15 @@
 # 编排(purge/delete_kb跨存储)留模块函数(不抽Service, YAGNI), 只下沉SQL到此
 
 from src.storage.mysql import MySQLStore
-from src.domain.models import (User, KnowledgeBase, Document, DocumentVersion, IndexingJob,
-    ChunkMeta, ConversationMessage, KBWithCount, DocumentListItem, DocumentDetail, ConversationSummary)
+from src.domain.models import (
+    User,
+    KnowledgeBase,
+    ConversationMessage,
+    KBWithCount,
+    DocumentListItem,
+    DocumentDetail,
+    ConversationSummary,
+)
 
 
 class UserRepository:
@@ -114,6 +121,15 @@ class DocumentRepository:
         # 幂等检查: 返回{deleted_at}行(NULL=未删/时间戳=已删)或None(记录不存在), 调用方据此区分404/幂等/删除
         return await self._m.fetchrow("SELECT deleted_at FROM documents WHERE id=%s", doc_id)
 
+    async def set_active_version(self, document_id: str, version_id: str) -> int:
+        """原子切换文档活动版本，仅允许已索引版本成为当前版本."""
+        return await self._m.execute(
+            "UPDATE documents d JOIN document_versions v ON v.document_id=d.id "
+            "SET d.active_version_id=%s WHERE d.id=%s AND v.id=%s "
+            "AND v.status IN ('INDEXED','READY')",
+            version_id, document_id, version_id)
+
+
     async def purge_with_versions(self, doc_id: str, version_ids: list[str], user_id: str = "default"):
         """事务级联: 物理删 chunks/jobs/versions + 软删 document. Qdrant/OSS由调用方事务外删(幂等).
         替代MySQLStore.delete_document_data."""
@@ -133,6 +149,31 @@ class DocumentRepository:
     async def count(self) -> int:
         r = await self._m.fetchrow("SELECT COUNT(*) AS c FROM documents")
         return (r or {}).get("c", 0)
+
+
+    async def get_active_version_ids(
+        self,
+        tenant_id: str,
+        kb_ids: list[str] | None = None,
+    ) -> list[str] | None:
+        """获取当前可检索版本，旧库 active pointer 为空时回退到已索引最新版本."""
+        sql = (
+            "SELECT d.id AS document_id, d.active_version_id, "
+            "(SELECT v2.id FROM document_versions v2 "
+            " WHERE v2.document_id=d.id AND v2.status IN ('INDEXED','READY') "
+            " ORDER BY v2.created_at DESC LIMIT 1) AS fallback_version_id "
+            "FROM documents d JOIN knowledge_bases kb ON kb.id=d.kb_id "
+            "WHERE d.deleted_at IS NULL AND kb.deleted_at IS NULL AND kb.tenant_id=%s"
+        )
+        args: list = [tenant_id]
+        if kb_ids:
+            placeholders = ",".join(["%s"] * len(kb_ids))
+            sql += f" AND d.kb_id IN ({placeholders})"
+            args.extend(kb_ids)
+        rows = await self._m.fetch(sql, *args)
+        version_ids = [r.get("active_version_id") or r.get("fallback_version_id") for r in rows
+                       if r.get("active_version_id") or r.get("fallback_version_id")]
+        return version_ids if rows else None
 
 
 class DocumentVersionRepository:

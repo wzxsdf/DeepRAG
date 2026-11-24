@@ -15,10 +15,11 @@ from src.core.lifespan import get_mysql, get_oss, get_qdrant
 router = APIRouter(prefix="/api/v1", tags=["documents"])
 
 
-async def purge_document(document_id: str, user_id: str, mysql: MySQLStore, oss: OssStore, qdrant: QdrantWriter):
-    """物理清理单个文档全部数据 + 软删 documents 行. 供 DELETE /documents 与 DELETE /kbs 复用(DRY).
-    顺序: Qdrant(隔离检索)→OSS(释放空间)→MySQL(子表物理删+主表软删). 幂等(删已删无副作用).
-    mysql/oss/qdrant 由调用方经 Depends 注入(共享池)."""
+async def purge_document(document_id: str, user_id: str, mysql: MySQLStore, oss: OssStore,
+                         qdrant: QdrantWriter, tenant_id: str = "default"):
+    """物理清理文档数据，并在删除前失效租户查询缓存."""
+    from src.cache import get_hybrid_cache
+    await get_hybrid_cache().invalidate_scope(tenant_id)
     version_repo = DocumentVersionRepository(mysql)
     doc_repo = DocumentRepository(mysql)
     chunk_repo = ChunkRepository(mysql)
@@ -96,7 +97,8 @@ async def confirm_upload(req: ConfirmUploadRequest, background_tasks: Background
     await IndexingJobRepository(mysql).create(job_id, version_id)
     from apps.worker.ingestion import ingest_document
     # ponytail: 传document_id入库→写Qdrant payload真document_id(修原document_id=version_id的bug)
-    background_tasks.add_task(ingest_document, version_id, req.oss_key, req.kb_id, document_id)
+    background_tasks.add_task(ingest_document, version_id, req.oss_key, req.kb_id, document_id,
+                              user.get("tenant_id", "default"))
     return DocumentResponse(document_id=document_id, version_id=version_id, status="PENDING")
 
 
@@ -142,5 +144,6 @@ async def delete_document(document_id: str, user=Depends(get_current_user),
         raise HTTPException(404, "文档不存在")
     if row.get("deleted_at"):
         return {"document_id": document_id, "status": "DELETED"}  # 幂等
-    await purge_document(document_id, user["user_id"], mysql, oss, qdrant)
+    await purge_document(document_id, user["user_id"], mysql, oss, qdrant,
+                         user.get("tenant_id", "default"))
     return {"document_id": document_id, "status": "DELETED"}

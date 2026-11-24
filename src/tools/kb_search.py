@@ -41,7 +41,7 @@ async def search_kb_tool(query: str, config: RunnableConfig) -> str:
         "- 产品客户群体覆盖金融、医疗、教育等领域..."
     """
     from src.storage.protocol import RetrievalFilter
-    from src.retrieval.reranker import rerank
+    from src.retrieval.reranker import DEFAULT_RETRIEVAL_CANDIDATES, rerank
 
     cfg = (config or {}).get("configurable", {})
     retriever = cfg.get("retriever")
@@ -53,11 +53,11 @@ async def search_kb_tool(query: str, config: RunnableConfig) -> str:
     kb_ids = cfg.get("kb_ids")
 
     try:
-        # 检索：top_k=5
+        # 召回扩大候选池，再由Cross-Encoder精排到工具摘要需要的3条
         docs = await retriever.retrieve(
             query,
             RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids),
-            top_k=5
+            top_k=DEFAULT_RETRIEVAL_CANDIDATES,
         )
 
         # 重排序：top_n=3
