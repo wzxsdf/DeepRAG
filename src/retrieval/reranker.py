@@ -13,10 +13,25 @@ load_dotenv()
 _RERANK_URL = os.getenv("EMBEDDING_BASE_URL", "") + "/rerank"
 _RERANK_HEADERS = {"Authorization": f"Bearer {os.getenv('EMBEDDING_API_KEY', '')}"}
 _RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+DEFAULT_RETRIEVAL_CANDIDATES = 20
+
+
+def deduplicate_documents(docs: List[RetrievedDocument]) -> List[RetrievedDocument]:
+    """按父块去重，保留融合排序中最靠前的 child."""
+    unique: list[RetrievedDocument] = []
+    seen: set[str] = set()
+    for doc in docs:
+        key = f"parent:{doc.parent_id}" if doc.parent_id else f"chunk:{doc.chunk_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(doc)
+    return unique
 
 
 async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> List[RetrievedDocument]:
-    """Cross-Encoder精排. 返回重排序docs(原地改score+source). 失败回退原序裁剪."""
+    """Cross-Encoder精排. 先按parent去重，失败时回退去重后的原序."""
+    docs = deduplicate_documents(docs)
     if not docs:
         return docs
     payload = {

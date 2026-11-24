@@ -174,9 +174,13 @@ def _retrieve_node(retriever):
         tenant = state.get("tenant_id", "default")
         kb_ids = state.get("kb_ids") or None
         # ponytail: kb模式固定单次检索+rerank(删complex多跳); 多跳需求由agent的plan覆盖
-        from src.retrieval.reranker import rerank
+        from src.retrieval.reranker import DEFAULT_RETRIEVAL_CANDIDATES, rerank
         from src.storage.protocol import RetrievalFilter
-        docs = await retriever.retrieve(state["query"], RetrievalFilter(tenant_id=tenant, kb_ids=kb_ids), top_k=5)
+        docs = await retriever.retrieve(
+            state["query"],
+            RetrievalFilter(tenant_id=tenant, kb_ids=kb_ids),
+            top_k=DEFAULT_RETRIEVAL_CANDIDATES,
+        )
         return {"documents": await rerank(state["query"], docs, top_n=5)}
     return _retrieve
 

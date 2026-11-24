@@ -23,14 +23,29 @@ async def _update_status(version_id, version_status, job_status=None, error=None
         await mysql.close()
 
 
-async def ingest_document(version_id: str, oss_key: str, kb_id: str = "default", document_id: str = ""):
-    """完整入库: 解析(PyMuPDF)→切分→向量化(SiliconFlow)→写Qdrant+MySQL+OSS. 更新job状态. 供BackgroundTasks."""
+async def ingest_document(version_id: str, oss_key: str, kb_id: str = "default", document_id: str = "", tenant_id: str = "default"):
+    """完整入库并在成功后原子激活版本、失效租户查询缓存."""
     from apps.worker.ingestion_core import parse_document_from_oss, index_chunks_to_qdrant
     try:
         await _update_status(version_id, "PARSING", "RUNNING")
         parsed = await parse_document_from_oss(version_id, oss_key)
         await _update_status(version_id, "INDEXING", "RUNNING")
         await index_chunks_to_qdrant(version_id, parsed["parsed_key"], kb_id=kb_id, document_id=document_id)
+        await _update_status(version_id, "INDEXED", "RUNNING")
+        from src.storage.mysql import MySQLStore
+        from src.storage.repositories import DocumentRepository
+        from src.cache import get_hybrid_cache
+        mysql = MySQLStore(host=os.getenv("MYSQL_HOST"), port=int(os.getenv("MYSQL_PORT")),
+                           db=os.getenv("MYSQL_DATABASE", os.getenv("MYSQL_DB", "deeprag")),
+                           user=os.getenv("MYSQL_USER"), password=os.getenv("MYSQL_PASSWORD"))
+        await mysql.connect()
+        try:
+            updated = await DocumentRepository(mysql).set_active_version(document_id, version_id)
+            if not updated:
+                raise RuntimeError(f"active version switch failed: document={document_id}, version={version_id}")
+        finally:
+            await mysql.close()
+        await get_hybrid_cache().invalidate_scope(tenant_id)
         await _update_status(version_id, "INDEXED", "SUCCESS")
     except Exception as e:
         await _update_status(version_id, "FAILED", "FAILED", str(e)[:500])

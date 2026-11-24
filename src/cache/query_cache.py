@@ -1,11 +1,11 @@
 # Redis缓存系统 - 查询+文档混合策略
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 import redis.asyncio as redis
 import json
 import hashlib
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 from src.core.logging import log
 
@@ -60,31 +60,52 @@ class QueryCache:
         self,
         question: str,
         filters: Dict[str, Any],
-        mode: str = "query"
+        mode: str = "query",
+        generation: str = "0",
     ) -> str:
-        """生成缓存键
-
-        Args:
-            question: 查询问题
-            filters: 过滤条件
-            mode: 查询模式
-
-        Returns:
-            str: 缓存键
-        """
-        # 标准化输入
-        normalized_question = question.strip().lower()
-
-        # 构建缓存内容
+        """生成带租户世代的缓存键."""
         cache_content = {
-            "question": normalized_question,
-            "filters": sorted(filters.items()),  # 排序确保一致性
-            "mode": mode
+            "question": question.strip().lower(),
+            "filters": self._normalize_value(filters),
+            "mode": mode,
+            "generation": str(generation),
         }
-
-        # 生成哈希
-        content_str = json.dumps(cache_content, sort_keys=True)
+        content_str = json.dumps(cache_content, sort_keys=True, ensure_ascii=False)
         return f"query_cache:{hashlib.md5(content_str.encode()).hexdigest()}"
+
+    @staticmethod
+    def _normalize_value(value: Any) -> Any:
+        """规范化过滤条件，避免列表顺序造成不同作用域."""
+        if isinstance(value, dict):
+            return {str(k): QueryCache._normalize_value(v) for k, v in sorted(value.items())}
+        if isinstance(value, (list, tuple, set)):
+            values = [QueryCache._normalize_value(v) for v in value]
+            return sorted(values, key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
+        return value
+
+    @staticmethod
+    def _tenant_id(filters: Dict[str, Any]) -> str:
+        return str(filters.get("tenant_id") or "default")
+
+    async def _get_generation(self, tenant_id: str) -> str:
+        redis_client = await self._get_redis()
+        value = await redis_client.get(f"query_cache_epoch:{tenant_id}")
+        return str(value or "0")
+
+    async def bump_generation(self, tenant_id: str = "default") -> int:
+        """提升租户查询缓存世代，旧世代结果自然失效."""
+        try:
+            redis_client = await self._get_redis()
+            generation = await redis_client.incr(f"query_cache_epoch:{tenant_id}")
+            log.info("query_cache_generation_bumped", tenant_id=tenant_id, generation=generation)
+            return int(generation)
+        except Exception as e:
+            log.warning("query_cache_generation_bump_failed", tenant_id=tenant_id,
+                        error=type(e).__name__, msg=str(e))
+            return 0
+
+    def _same_scope(self, cached_filters: Dict[str, Any], request_filters: Dict[str, Any]) -> bool:
+        return self._normalize_value(cached_filters) == self._normalize_value(request_filters)
 
     async def get(
         self,
@@ -103,7 +124,8 @@ class QueryCache:
             Dict: 缓存结果，未命中返回None
         """
         filters = filters or {}
-        cache_key = self._generate_cache_key(question, filters, mode)
+        generation = await self._get_generation(self._tenant_id(filters))
+        cache_key = self._generate_cache_key(question, filters, mode, generation)
 
         redis_client = await self._get_redis()
 
@@ -111,14 +133,18 @@ class QueryCache:
             # 1. 精确匹配
             result = await redis_client.get(cache_key)
             if result:
-                self._stats.hits += 1
-                self._update_stats()
-                log.info("cache_hit", key=cache_key[:16] + "...", type="exact")
-                return json.loads(result)
+                cache_data = json.loads(result)
+                if (cache_data.get("generation") == generation
+                        and cache_data.get("mode") == mode
+                        and self._same_scope(cache_data.get("filters", {}), filters)):
+                    self._stats.hits += 1
+                    self._update_stats()
+                    log.info("cache_hit", key=cache_key[:16] + "...", type="exact")
+                    return cache_data.get("result")
 
             # 2. 语义相似度匹配（如果启用）
             if self.enable_semantic:
-                semantic_result = await self._semantic_cache_lookup(question, filters, mode)
+                semantic_result = await self._semantic_cache_lookup(question, filters, mode, generation)
                 if semantic_result:
                     self._stats.hits += 1
                     self._update_stats()
@@ -157,7 +183,8 @@ class QueryCache:
             bool: 是否设置成功
         """
         filters = filters or {}
-        cache_key = self._generate_cache_key(question, filters, mode)
+        generation = await self._get_generation(self._tenant_id(filters))
+        cache_key = self._generate_cache_key(question, filters, mode, generation)
 
         redis_client = await self._get_redis()
 
@@ -166,8 +193,9 @@ class QueryCache:
             cache_data = {
                 "question": question,
                 "result": result,
-                "filters": filters,
+                "filters": self._normalize_value(filters),
                 "mode": mode,
+                "generation": generation,
                 "timestamp": datetime.now().isoformat(),
                 "ttl": ttl or self.ttl
             }
@@ -211,18 +239,14 @@ class QueryCache:
             bool: 是否删除成功
         """
         filters = filters or {}
-        cache_key = self._generate_cache_key(question, filters, mode)
+        generation = await self._get_generation(self._tenant_id(filters))
+        cache_key = self._generate_cache_key(question, filters, mode, generation)
 
         redis_client = await self._get_redis()
 
         try:
-            # 删除精确匹配缓存
+            # 删除当前世代的精确缓存
             await redis_client.delete(cache_key)
-
-            # 如果启用语义缓存，也需要处理相关缓存
-            if self.enable_semantic:
-                await self._invalidate_semantic_cache(question, filters, mode)
-
             log.info("cache_invalidated", key=cache_key[:16] + "...")
             return True
 
@@ -234,7 +258,8 @@ class QueryCache:
         self,
         question: str,
         filters: Dict[str, Any],
-        mode: str
+        mode: str,
+        generation: str,
     ) -> Optional[Dict[str, Any]]:
         """语义相似度缓存查找
 
@@ -248,8 +273,6 @@ class QueryCache:
         """
         # 这里简化实现：在实际应用中需要向量相似度计算
         # 使用简单的关键词匹配作为替代
-        from src.memory.user_profile import UserPreferenceLearner
-        from src.core.config import get_settings
 
         try:
             # 获取偏好学习器
@@ -270,6 +293,10 @@ class QueryCache:
                         continue
 
                     cache_data = json.loads(cached)
+                    if (str(cache_data.get("generation")) != str(generation)
+                            or cache_data.get("mode") != mode
+                            or not self._same_scope(cache_data.get("filters", {}), filters)):
+                        continue
                     cached_question = cache_data.get("question", "")
 
                     # 计算关键词重叠度
@@ -299,11 +326,10 @@ class QueryCache:
         self,
         question: str,
         filters: Dict[str, Any],
-        mode: str
+        mode: str,
     ) -> None:
-        """使语义缓存失效"""
-        # 简化实现：在当前版本中，语义缓存是临时的
-        pass
+        """语义缓存通过租户世代失效，无需枚举问题哈希."""
+        await self.bump_generation(self._tenant_id(filters))
 
     def _extract_keywords(self, text: str) -> List[str]:
         """提取关键词（简化版本）
@@ -624,8 +650,12 @@ class HybridCache:
         filters: Dict[str, Any] = None,
         mode: str = "query"
     ) -> bool:
-        """使查询缓存失效"""
+        """使单个查询缓存失效."""
         return await self.query_cache.invalidate(question, filters or {}, mode)
+
+    async def invalidate_scope(self, tenant_id: str = "default") -> int:
+        """使租户范围内的查询缓存失效，包括语义缓存候选."""
+        return await self.query_cache.bump_generation(tenant_id)
 
     async def get_document(self, document_id: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
         """获取文档缓存"""

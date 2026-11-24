@@ -11,6 +11,7 @@ class RetrievalFilter:
     kb_ids: list[str] | None = None  # ponytail: 多KB检索(None=不限)
     acl_tags: list[str] | None = None
     active_version_id: str | None = None
+    active_version_ids: list[str] | None = None
 
 @dataclass
 class RetrievedDocument:

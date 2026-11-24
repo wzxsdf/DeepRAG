@@ -13,7 +13,7 @@ async def run_plan_agent(retriever, question: str, tenant_id: str = "default",
     """
     from src.tools import get_weather, calculate, web_search
     from src.storage.protocol import RetrievalFilter
-    from src.retrieval.reranker import rerank
+    from src.retrieval.reranker import DEFAULT_RETRIEVAL_CANDIDATES, rerank
     from src.prompts import PLAN_PROMPT
     from src.agents.llm import chat
 
@@ -21,12 +21,14 @@ async def run_plan_agent(retriever, question: str, tenant_id: str = "default",
 
     async def _exec_plan_step(step: dict) -> tuple:
         """执行单步: 返回(type, arg, result). kb走retrieve+rerank, 其余走对应工具."""
-        from src.retrieval.reranker import rerank
-        from src.storage.protocol import RetrievalFilter
         t = step.get("type")
         if t == "kb":
             q = step.get("query", "")
-            docs = await retriever.retrieve(q, RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids), top_k=5)
+            docs = await retriever.retrieve(
+                q,
+                RetrievalFilter(tenant_id=tenant_id, kb_ids=kb_ids),
+                top_k=DEFAULT_RETRIEVAL_CANDIDATES,
+            )
             docs = await rerank(q, docs, top_n=3)
             return ("kb", q, "\n".join(f"- {d.content[:150]}" for d in docs) or "(无结果)")
         if t == "weather":
