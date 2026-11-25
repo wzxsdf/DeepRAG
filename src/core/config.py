@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 0  # ponytail: 记忆db0/查询缓存db1/文档缓存db2, 实例级单URL按用途分库
 
+    # --- 查询缓存(评审修复20261126) ---
+    # 语义缓存默认关闭: 词袋重叠方案词序/否定词盲("支持X吗"vs"不支持X"误命中实测0.95);
+    # 精确缓存不受影响照常生效。确认升级为向量相似度后再开启。
+    cache_semantic_enabled: bool = False
+
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)
     memory_max_context_tokens: int = 2000    # 历史占用token预算; 超过才触发摘要+窗口

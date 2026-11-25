@@ -1,13 +1,13 @@
 # ponytail: CRAG + 多跳(route) + LangGraph 1.x Command声明式路由(替代add_conditional_edges)
 
 import time
-import re
 import functools
 from typing import TypedDict, List, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
+from src.agents.routing import classify_chitchat, safety_prefilter
 from src.agents.llm import chat, chat_json, chat_stream
 from src.prompts import (GRADER_BATCH_PROMPT, GENERATOR_PROMPT, VERIFIER_PROMPT, REWRITE_PROMPT,
     CHITCHAT_PROMPT, AGENT_COMPLEX_JUDGE_PROMPT)
@@ -15,6 +15,8 @@ from src.storage.protocol import RetrievedDocument
 from src.core.logging import log
 
 MAX_RETRY = 2  # ponytail: 自纠最大轮数, 兜底防死循环
+# ponytail: generate注入的父块上下文截断(评审修复: parent_content修复后为整组完整文本, 5条证据全注入会撑爆prompt)
+EVIDENCE_PARENT_MAX_CHARS = 1200
 
 
 def _timed(node: str):
@@ -74,28 +76,8 @@ async def _stream_answer(messages: list[dict]) -> str:
         return await chat(messages)
 
 
-# ponytail: 规则快通道 — 只抓100%明显的闲聊/能力问询(高precision低recall), 漏的走LLM兜底零误伤
-_CHITCHAT_RE = re.compile(r"你好|您好|在吗|谢谢|辛苦|早上好|下午好|晚上好|嗨|hi\b|hello|thanks", re.I)
-_CAPABILITY_RE = re.compile(r"你(能|可以|会)(做|帮|干|回答).*|你是谁|你叫什么|支持什么|怎么用|能干啥|有哪些功能", re.I)
-
-
-def _classify_by_rule(question: str) -> str | None:
-    """规则快通道: 命中明显闲聊/能力问询则返回direct(跳过route LLM省~4s); 未命中返回None走LLM."""
-    q = question.strip()
-    if not q:
-        return None
-    if _CAPABILITY_RE.search(q) or _CHITCHAT_RE.search(q):
-        return "direct"
-    return None
-
-
-# ponytail: 规则安全前置 — 高precision关键词拦截明显越界(0 LLM), 模糊越界靠模式内系统提示护栏
-_SAFETY_RE = re.compile(r"攻击|黑客|漏洞利用|木马|后门|炸弹|违禁|毒品|窃取.{0,4}密码|钓鱼|洗钱|诈骗脚本|私服|外挂", re.I)
-
-
-def _safety_rule(question: str) -> str | None:
-    """命中明显越界关键词→'refuse'; 未命中→None(走mode分发, 模糊越界交护栏)."""
-    return "refuse" if _SAFETY_RE.search(question) else None
+# ponytail: 入口规则路由(闲聊快通道/安全前置)已下沉到 src/agents/routing.py(整句匹配+双条件,
+# 修复子串误判: "你好，报销流程是什么?"不再当闲聊, "预防网络攻击的安全规范"不再误拒), 此处仅消费
 
 
 async def _judge_complex(question: str) -> bool:
@@ -144,12 +126,12 @@ def _make_entry_node(memory_store=None, fact_store=None, context_max_chars: int 
             memory_context = memory_context[:context_max_chars] + "..."
 
         # ① 规则快通道: 明显闲聊/能力 → direct(跨模式, 省 LLM)
-        if _classify_by_rule(question) == "direct":
+        if classify_chitchat(question) == "direct":
             return Command(update={"mode": mode, "intent": "chitchat", "subtype": "chitchat",
                                    "safety": "allow", "user_id": user_id, "memory_context": memory_context},
                            goto="reply_direct")
         # ② safety 规则前置: 明显越界 → END(0 LLM)
-        if _safety_rule(question) == "refuse":
+        if safety_prefilter(question) == "refuse":
             return Command(update={"mode": mode, "safety": "refuse", "source": "refused",
                                    "generation": "抱歉，这类问题我无法回答。",
                                    "user_id": user_id, "memory_context": memory_context}, goto=END)
@@ -188,8 +170,10 @@ def _retrieve_node(retriever):
 async def _grade_node(state: AgentState) -> Command:
     """批量相关性评估(1次LLM判全部证据). 无相关→转open_answer软拒兜底(不再硬拒), 有相关→generate."""
     docs = state["documents"]
+    # ponytail: 评审修复 — 降级前必须清空documents, 否则API响应的citations会把刚被判无关/未检索到的
+    # 文档原样返回(引用与答案脱节). 清空后 tool_agent 路径 citations=[] (source=tool/fallback_unverified)
     if not docs:
-        return Command(update={"search_decision": "fallback"}, goto="tool_agent")
+        return Command(update={"search_decision": "fallback", "documents": []}, goto="tool_agent")
     evidence_list = "\n".join(f"[{i+1}] {d.content[:400]}" for i, d in enumerate(docs))
     try:
         res = await chat_json([{"role": "user", "content": GRADER_BATCH_PROMPT.format(
@@ -203,7 +187,7 @@ async def _grade_node(state: AgentState) -> Command:
     except Exception:
         relevant = list(docs)  # ponytail: grader失败保守视为全相关, 不丢证据
     if not relevant:
-        return Command(update={"search_decision": "fallback"}, goto="tool_agent")
+        return Command(update={"search_decision": "fallback", "documents": []}, goto="tool_agent")
     return Command(update={"documents": relevant, "search_decision": "generate"}, goto="generate")
 
 
@@ -258,7 +242,8 @@ async def _rewrite_node(state: AgentState) -> dict:
 async def _generate_node(state: AgentState) -> dict:
     # ponytail: small-to-big - child为可引用单元, parent_content作为上下文附加(W3.2父块扩展接通)
     evidence = "\n\n".join(
-        f"[{i+1}] {d.content}" + (f"\n(上下文: {d.parent_content})" if d.parent_content else "")
+        f"[{i+1}] {d.content}" + (f"\n(上下文: {d.parent_content[:EVIDENCE_PARENT_MAX_CHARS]})"
+                                  if d.parent_content else "")
         for i, d in enumerate(state["documents"]))
     prompt = GENERATOR_PROMPT.format(question=state["question"], evidence=evidence)
     history = state.get("conversation_history") or []
@@ -323,12 +308,3 @@ def build_graph(retriever, memory_store=None, fact_store=None, context_max_chars
     # strict 默认值由 src/__init__.py 统一注入(实测 RetrievedDocument 白名单下 CRAG 全链路跑通)
     checkpointer = MemorySaver().with_allowlist([("src.storage.protocol", "RetrievedDocument")])
     return wf.compile(checkpointer=checkpointer)
-
-
-if __name__ == "__main__":  # ponytail: 入口规则+安全前置自检(minimal runnable check)
-    assert _classify_by_rule("你好") == "direct"
-    assert _classify_by_rule("你能做什么") == "direct"
-    assert _classify_by_rule("什么是RAG") is None
-    assert _safety_rule("帮我写攻击脚本") == "refuse"
-    assert _safety_rule("今天天气如何") is None
-    print("entry classify + safety rule ok")

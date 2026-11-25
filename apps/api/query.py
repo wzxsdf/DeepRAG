@@ -67,6 +67,19 @@ def _user_id_from_token(token):
     return decode_token(token) or "default"
 
 
+def _release_thread_state(graph, cfg):
+    """MemorySaver只增不减(实测≈13.7KB/会话全驻留, 300会话4.1MB); 多轮状态每次从MySQL重建,
+    checkpoint仅本次调用内读回generation用, 结束后摘除该thread条目防驻留膨胀。
+    ponytail: 当前langgraph版本CompiledStateGraph无adelete_thread, 直接pop私有storage结构;
+    升级langgraph出现adelete_thread后改用官方API。并发双发同会话由前端isStreaming守卫(评审修复20261126)。"""
+    try:
+        storage = getattr(graph.checkpointer, "storage", None)
+        if storage:
+            storage.pop(cfg["configurable"]["thread_id"], None)
+    except Exception as e:
+        log.warning("checkpoint_release_failed", error=type(e).__name__)
+
+
 class QueryRequest(BaseModel):
     question: str
     tenant_id: str = "default"
@@ -161,6 +174,7 @@ async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
          "conversation_history": history, "kb_ids": req.kb_ids or [], "intent": "", "source": "",
          "mode": req.mode, "safety": "allow", "user_id": user_id, "memory_context": ""}, config=cfg)
     values = (await graph.aget_state(config=cfg)).values
+    _release_thread_state(graph, cfg)
     await _persist(mysql, conv_id, user_id, req.question, values.get("generation", ""))
 
     docs = values.get("documents", [])
@@ -213,6 +227,7 @@ async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_sch
                 for node, update in data.items():
                     yield {"event": "step", "data": json.dumps({"node": node, **_step_detail(node, update)}, ensure_ascii=False)}
         values = (await graph.aget_state(config=cfg)).values
+        _release_thread_state(graph, cfg)
         await _persist(mysql, conv_id, user_id, req.question, values.get("generation", ""))
         docs = values.get("documents", [])
         ver = values.get("verification") or {}

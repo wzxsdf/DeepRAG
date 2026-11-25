@@ -23,6 +23,25 @@
 - **依赖修复(qdrant-client)**:1.12.1 → 1.19.1,`pyproject.toml` 下限提至 `>=1.14.0`。原因:`query_points` 对 `Qdrant/bm25` 的服务端推理透传需 client ≥1.14,1.12 误走本地 fastembed 报 `not among supported models`,导致 **hybrid(BM25 路)检索整体不可用**(P0 级问题);1.20 对 server 1.18.3 有 minor 差 2 的兼容警告,故固定 1.19。
 - **eval_crag 显式 `mode="kb"`**:缺省 mode=quick 会使 graph 进入 tool_agent(联网工具检索),与检索消融口径不可比;修复前 CRAG 行全 0(trial 20261125_002736,已删除该误导性产物)。
 
+### 设计评审修复: 六项正确性缺陷(2026-11-26 第四轮)
+
+评审方法: 通读全部核心模块 + 只读复现脚本离线坐实(LLM/Qdrant/OSS 全假对象替换, 不动真实服务), 每项缺陷转化为 `tests/unit/test_correctness_fixes.py` 回归断言。
+
+| # | 缺陷(复现证据) | 修复 | 验证 |
+|---|---|---|---|
+| 1 | 入口闲聊正则子串匹配: "你好，我们公司的报销流程是什么？"被误判闲聊**跳过知识库直答**;"Redis怎么用"被"怎么用"误判 | 正则下沉 `src/agents/routing.py`, 闲聊/能力问询改**整句 fullmatch**; 夹带正事的问候走正常路由 | 复现脚本 B 组 10 例 + 单测 26 例 |
+| 2 | 安全正则单词命中: "预防**网络攻击**的安全规范""对**炸弹**威胁的处置流程"被误拒 | "请求动词+危害对象"**双条件**共现才拒(动词表不含"如何/怎么"); 疑问式/模糊越界交模型护栏(TOOL_AGENT_PROMPT 规则 5 / GENERATOR_PROMPT 规则 4 新增) | 复现脚本 B 组 + 单测 |
+| 3 | kb 模式证据全被判无关后转 tool_agent 兜底, **citations 仍返回刚被判无关的文档**(引用与答案脱节, 违背引用溯源定位) | `_grade_node` 两处降级 Command 显式 `documents=[]` | 假对象图复现: citations=[] + source=tool |
+| 4 | 父块只存组内**第一段**: `split_parent_child` 各 child 的 parent_content 是累加快照, OSS 落盘取首个非空 child → 组内第 2+ 个 child 命中所见"父块"只有第 1 段, 父块展开名存实亡(旧 `test_parent_expansion.py` 只断言非空故一直 PASS) | 每组**最后一个 child 持有完整组文本**, 回填全组; generate 注入侧加 `EVIDENCE_PARENT_MAX_CHARS=1200` 截断防 prompt 膨胀 | 5 段语料复现: 全部 child 可见 1-5 段 + 单测含组切换边界 |
+| 5 | 语义缓存词袋重叠**词序/否定词盲**: "Redis支持持久化吗"vs"不支持"相似度 0.95 命中(停用词表丢弃"不"); "项目A负责人"vs"项目B"命中 | **默认关闭**(`QueryCache.enable_semantic=False` + `CACHE_SEMANTIC_ENABLED` env 可回开); 精确缓存不受影响; `scripts/test_semantic_cache.py` 头部标注 env 要求; 升级向量相似度列为 roadmap | 单测存档反义误命中证据 |
+| 6 | `OssStore` async def 内直调同步 oss2: 5 路并发 GET **实际串行 1.0s, 事件循环停摆 1002ms**(to_thread 对照组 0.20s/29ms) | get/put/delete/delete_by_prefix 全部包 `asyncio.to_thread`; sign_url 本地签名保持同步; 入库侧 PyMuPDF 解析同步抽 `_extract_pdf_texts` + to_thread | 单测: 5×0.2s 并发 wall<0.45s 且循环停顿<150ms |
+
+附加修复:
+- **MemorySaver 驻留泄漏**: 实测 ≈13.7KB/会话全量驻留(300 会话 4.1MB, 无任何清理)。多轮状态每次从 MySQL 重建, checkpoint 仅本次读回用 → query.py 两路响应后 `_release_thread_state` 摘除线程条目(当前 langgraph 无 `adelete_thread`, 用私有 storage.pop, 升级时复查)。
+- **依赖声明补齐**(干净环境 `pip install -e .` 此前起不来): `passlib`+`bcrypt`(auth.py 哈希)、`python-jose[cryptography]`(JWT)、`PyMuPDF`(import fitz, Docling 弃用后的实际解析器)、`sse-starlette`(EventSourceResponse)。CI 闭包同步追加 langgraph/langchain/oss2(新单测所需)。
+
+回归验证: `python -m pytest tests -q` → **41 passed**(原 5 + 新 36); ruff E9/F passed; `import apps.api.main` ok; 复现脚本复跑六项全部翻转。golden v2 口径影响评估: ①②③⑤⑥ 不触碰检索打分链路, ④ 仅影响真实入库链路(golden v2 评测走直连 chunk, 不经分块), 基线数字预期不变, 未重跑。
+
 ### 基线追踪与生成侧 p95 实验(2026-11-25 第三轮)
 
 - **基线确立**:golden v2 同口径连跑 3 轮聚合([docs/trials/baseline.md](trials/baseline.md)):检索四行指标 **std=0.000**(入库+检索全链路确定性复现);CRAG R@1 0.938±0.010、p50 9474±161ms、p95 16394±1107ms、Faith/Cite 1.000±0.000、3 轮 0 次重试。后续改动前后各跑 N 轮对比此表判回退/增益(`scripts/aggregate_baseline.py`)。

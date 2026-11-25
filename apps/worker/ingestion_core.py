@@ -3,6 +3,7 @@
 import os
 import uuid
 import hashlib
+import asyncio
 from typing import List, Dict
 from dotenv import load_dotenv
 import json
@@ -55,7 +56,8 @@ async def embed_chunks(chunks: List[Dict]) -> List[Dict]:
     return chunks
 
 def split_parent_child(parsed_content: str) -> List[Dict]:
-    """Parent-Child切分"""
+    """Parent-Child切分. ponytail: parent_content为整组完整文本(评审修复20261126 —
+    旧实现各child存累加过程快照, 组内第2+个child命中所见"父块"只有第1段, 父块展开名存实亡)."""
     doc_data = json.loads(parsed_content)
     chunks = []
     current_parent = ""
@@ -85,22 +87,22 @@ def split_parent_child(parsed_content: str) -> List[Dict]:
             current_parent = ""
             parent_id = str(uuid.uuid4())
 
+    # 修正: 每组最后一个child的parent_content即完整组文本(累加到最后), 回填给组内全部child
+    full_by_parent: Dict[str, str] = {}
+    for c in chunks:
+        pid = c.get("parent_id")
+        if pid and c.get("parent_content"):
+            full_by_parent[pid] = c["parent_content"]
+    for c in chunks:
+        pid = c.get("parent_id")
+        if pid in full_by_parent:
+            c["parent_content"] = full_by_parent[pid]
+
     return chunks
 
-async def parse_document_from_oss(version_id: str, oss_key: str) -> Dict:
-    """从OSS解析文档(PyMuPDF, 保留页码+段落块). Docling因Win中文路径编码bug弃用."""
-    from src.storage.oss import OssStore
+def _extract_pdf_texts(pdf_data: bytes) -> List[Dict]:
+    """PyMuPDF按页提取文本块(同步CPU密集, 单独抽出便于to_thread包裹)."""
     import fitz
-
-    oss_store = OssStore(
-        endpoint=os.getenv("OSS_ENDPOINT"),
-        bucket=os.getenv("OSS_BUCKET"),
-        access_key_id=os.getenv("OSS_ACCESS_KEY_ID"),
-        access_key_secret=os.getenv("OSS_ACCESS_KEY_SECRET"),
-    )
-    pdf_data = await oss_store.get(oss_key)
-
-    # PyMuPDF 从bytes打开, 按页提取文本块(段落级 + 页码)
     doc = fitz.open(stream=pdf_data, filetype="pdf")
     texts = []
     for i, page in enumerate(doc):
@@ -109,6 +111,22 @@ async def parse_document_from_oss(version_id: str, oss_key: str) -> Dict:
             if text:
                 texts.append({"text": text, "page": i + 1})
     doc.close()
+    return texts
+
+
+async def parse_document_from_oss(version_id: str, oss_key: str) -> Dict:
+    """从OSS解析文档(PyMuPDF, 保留页码+段落块). Docling因Win中文路径编码bug弃用.
+    ponytail: fitz解析是同步CPU密集操作, to_thread包裹避免阻塞API事件循环(评审修复20261126)."""
+    from src.storage.oss import OssStore
+
+    oss_store = OssStore(
+        endpoint=os.getenv("OSS_ENDPOINT"),
+        bucket=os.getenv("OSS_BUCKET"),
+        access_key_id=os.getenv("OSS_ACCESS_KEY_ID"),
+        access_key_secret=os.getenv("OSS_ACCESS_KEY_SECRET"),
+    )
+    pdf_data = await oss_store.get(oss_key)
+    texts = await asyncio.to_thread(_extract_pdf_texts, pdf_data)
 
     parsed_content = json.dumps({"texts": texts}, ensure_ascii=False)
     parsed_key = f"parsed/{version_id}/document.json"
