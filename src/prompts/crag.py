@@ -36,19 +36,28 @@ GENERATOR_PROMPT = """基于以下证据回答问题。要求:
 VERIFIER_PROMPT = """检查回答质量。判断:
 1. grounded: 回答是否完全被证据支持(无幻觉)
 2. citations_valid: 每个 [n] 引用是否真实对应证据编号
+3. enough_evidence: 证据本身是否包含回答该问题所需的信息(只看证据与问题的匹配程度, 与答案写得好坏无关; 证据相关但答案没答好→true, 证据缺关键信息→false)
 
 问题: {question}
 回答: {answer}
 证据:
 {evidence}
 
-只输出JSON: {{"grounded": true或false, "citations_valid": true或false, "issue": "问题说明或ok"}}"""
+只输出JSON: {{"grounded": true或false, "citations_valid": true或false, "enough_evidence": true或false, "issue": "问题说明或ok"}}"""
 
 
-REWRITE_PROMPT = """改写下面的问题, 使其更适合检索(补充关键词、消除代词与歧义), 保留原意。
-只输出改写后的问题, 不要解释。
+REWRITE_PROMPT = """你是检索查询改写器。上一轮检索没有找到足够证据, 请改写查询以提高召回。
 
-原问题: {question}"""
+原始问题: {question}
+上一轮查询(效果不佳): {previous_query}
+失败原因: {issue}
+已检索过的证据(不足以回答, 改写方向要避开这些内容):
+{tried_evidence}{history}
+
+改写要求:
+1. 换关键词/同义词/上位词表达, 消除代词与歧义, 补充检索友好的关键词
+2. 不要在原查询上小修小补, 换一个能命中不同文档的表述
+3. 只输出改写后的查询, 不要解释"""
 
 
 __all__ = [

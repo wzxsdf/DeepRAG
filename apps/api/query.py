@@ -67,19 +67,6 @@ def _user_id_from_token(token):
     return decode_token(token) or "default"
 
 
-def _release_thread_state(graph, cfg):
-    """MemorySaver只增不减(实测≈13.7KB/会话全驻留, 300会话4.1MB); 多轮状态每次从MySQL重建,
-    checkpoint仅本次调用内读回generation用, 结束后摘除该thread条目防驻留膨胀。
-    ponytail: 当前langgraph版本CompiledStateGraph无adelete_thread, 直接pop私有storage结构;
-    升级langgraph出现adelete_thread后改用官方API。并发双发同会话由前端isStreaming守卫(评审修复20261126)。"""
-    try:
-        storage = getattr(graph.checkpointer, "storage", None)
-        if storage:
-            storage.pop(cfg["configurable"]["thread_id"], None)
-    except Exception as e:
-        log.warning("checkpoint_release_failed", error=type(e).__name__)
-
-
 class QueryRequest(BaseModel):
     question: str
     tenant_id: str = "default"
@@ -166,15 +153,14 @@ async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
                 source=cached_result.get("source", "cached")
             )
 
-    # ponytail: P0 checkpoint修复 — thread_id 复用 conversation_id(旧: 每请求新uuid致MemorySaver形同虚设)
+    # ponytail: P0 checkpoint修复 — thread_id 复用 conversation_id; checkpointer已移除(评审P2),
+    # ainvoke直接返回最终state, 多轮上下文每次从MySQL重建
     cfg = {"configurable": {"thread_id": conv_id}}
-    await graph.ainvoke(
+    values = await graph.ainvoke(
         {"question": req.question, "query": req.question, "tenant_id": req.tenant_id,
          "retry_count": 0, "documents": [], "search_decision": "", "generation": "", "verification": None,
          "conversation_history": history, "kb_ids": req.kb_ids or [], "intent": "", "source": "",
          "mode": req.mode, "safety": "allow", "user_id": user_id, "memory_context": ""}, config=cfg)
-    values = (await graph.aget_state(config=cfg)).values
-    _release_thread_state(graph, cfg)
     await _persist(mysql, conv_id, user_id, req.question, values.get("generation", ""))
 
     docs = values.get("documents", [])
@@ -212,7 +198,9 @@ async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_sch
     cfg = {"configurable": {"thread_id": conv_id}}  # ponytail: P0 checkpoint修复 — 复用conversation_id
 
     async def event_gen():
-        # ponytail: 多模式流 — updates(节点中间结果→step事件) + custom(Agent检索推理→thought事件)
+        # ponytail: 多模式流 — updates(节点中间结果→step事件+最终state累积) + custom(Agent检索推理→thought事件)
+        # checkpointer已移除(评审P2): 最终state从updates流累积, 不再aget_state
+        state_acc: dict = {}
         async for mode, data in graph.astream(
             {"question": req.question, "query": req.question, "tenant_id": req.tenant_id,
              "retry_count": 0, "documents": [], "search_decision": "", "generation": "", "verification": None,
@@ -225,9 +213,9 @@ async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_sch
                 yield {"event": "token" if tag == "token" else "thought", "data": json.dumps(data, ensure_ascii=False)}
             elif mode == "updates":
                 for node, update in data.items():
+                    state_acc.update(update)  # 最终state累积(替代aget_state)
                     yield {"event": "step", "data": json.dumps({"node": node, **_step_detail(node, update)}, ensure_ascii=False)}
-        values = (await graph.aget_state(config=cfg)).values
-        _release_thread_state(graph, cfg)
+        values = state_acc
         await _persist(mysql, conv_id, user_id, req.question, values.get("generation", ""))
         docs = values.get("documents", [])
         ver = values.get("verification") or {}

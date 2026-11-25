@@ -71,6 +71,7 @@ async def main():
 
     cfg = {"configurable": {"thread_id": "e2e-1"}}
     trace = []
+    values: dict = {}  # ponytail: checkpointer已移除(评审P2), 最终state从updates流累积
     async for event in graph.astream(
         {"question": QUESTION, "query": QUESTION, "tenant_id": "default", "retry_count": 0,
          "documents": [], "search_decision": "", "generation": "", "verification": None},
@@ -78,9 +79,9 @@ async def main():
     ):
         for node, update in event.items():
             trace.append(node)
+            values.update(update)
             print(f"  >> {node}: 更新 {list(update.keys())}")
 
-    values = (await graph.aget_state(config=cfg)).values
     gen = values.get("generation", "")
 
     print(f"\n[3] 状态机轨迹: {' → '.join(trace)}")

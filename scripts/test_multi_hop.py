@@ -40,6 +40,7 @@ async def main():
     graph = build_graph(HybridRetriever())
     cfg = {"configurable": {"thread_id": "mh-1"}}
     trace = []
+    values: dict = {}  # ponytail: checkpointer已移除(评审P2), 最终state从updates流累积
     async for event in graph.astream(
         {"question": QUESTION, "query": QUESTION, "tenant_id": "default", "retry_count": 0,
          "documents": [], "search_decision": "", "generation": "", "verification": None,
@@ -48,12 +49,12 @@ async def main():
     ):
         for node, update in event.items():
             trace.append(node)
+            values.update(update)
             if node == "route":
                 print(f"  >> route: complexity={update.get('complexity')} sub_queries={update.get('sub_queries')}")
             else:
                 print(f"  >> {node}: 更新 {list(update.keys())}")
 
-    values = (await graph.aget_state(config=cfg)).values
     doc_ids = [d.document_id for d in values.get("documents", [])]
     print(f"\n[2] 轨迹: {' → '.join(trace)}")
     print(f"    complexity={values.get('complexity')} | 命中文档: {doc_ids}")

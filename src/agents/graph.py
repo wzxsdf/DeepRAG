@@ -4,7 +4,6 @@ import time
 import functools
 from typing import TypedDict, List, Any
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from src.agents.routing import classify_chitchat, safety_prefilter
@@ -74,6 +73,14 @@ async def _stream_answer(messages: list[dict]) -> str:
         return "".join(parts)
     except Exception:
         return await chat(messages)
+
+
+def _format_evidence(docs: List[RetrievedDocument]) -> str:
+    """generate/verify共用的证据格式化(评审修复: 两者必须看同一份证据, 旧verify缺父块上下文)."""
+    return "\n\n".join(
+        f"[{i+1}] {d.content}" + (f"\n(上下文: {d.parent_content[:EVIDENCE_PARENT_MAX_CHARS]})"
+                                  if d.parent_content else "")
+        for i, d in enumerate(docs))
 
 
 # ponytail: 入口规则路由(闲聊快通道/安全前置)已下沉到 src/agents/routing.py(整句匹配+双条件,
@@ -235,17 +242,31 @@ def _plan_agent_node(retriever):
 
 
 async def _rewrite_node(state: AgentState) -> dict:
-    new_q = await chat([{"role": "user", "content": REWRITE_PROMPT.format(question=state["question"])}])
+    """纠错式改写(评审修复: 旧实现只看原问题, 温度0下重复同一改写): 携带失败原因+已试证据+历史."""
+    ver = state.get("verification") or {}
+    history = state.get("conversation_history") or []
+    hist_text = "\n".join(f"Q: {h.get('question', '')}\nA: {h.get('answer', '')}" for h in history)
+    tried = "\n".join(f"- {d.content[:100]}" for d in state.get("documents", [])[:3]) or "(无)"
+    prompt = REWRITE_PROMPT.format(
+        question=state["question"],
+        previous_query=state.get("query", state["question"]),
+        issue=ver.get("issue") or "证据不足",
+        tried_evidence=tried,
+        history=f"\n对话历史(供指代消解):\n{hist_text}\n" if hist_text else "",
+    )
+    new_q = await chat([{"role": "user", "content": prompt}])
     return {"query": new_q.strip(), "retry_count": state.get("retry_count", 0) + 1}
 
 
 async def _generate_node(state: AgentState) -> dict:
     # ponytail: small-to-big - child为可引用单元, parent_content作为上下文附加(W3.2父块扩展接通)
-    evidence = "\n\n".join(
-        f"[{i+1}] {d.content}" + (f"\n(上下文: {d.parent_content[:EVIDENCE_PARENT_MAX_CHARS]})"
-                                  if d.parent_content else "")
-        for i, d in enumerate(state["documents"]))
+    evidence = _format_evidence(state["documents"])
     prompt = GENERATOR_PROMPT.format(question=state["question"], evidence=evidence)
+    # 评审修复: verify判"证据够但答案没写好"时直达本节点重生成, 必须携带verifier反馈
+    # (温度0下不带反馈的重试只会逐字复现同一个答案, 重试无意义)
+    ver = state.get("verification") or {}
+    if state.get("retry_count", 0) > 0 and ver.get("issue") and ver.get("grounded") is False:
+        prompt += f"\n\n注意: 上一版答案被校验发现以下问题, 本次必须修正: {ver['issue']}"
     history = state.get("conversation_history") or []
     if history:
         # ponytail: P0 — history 已由记忆组件治理(摘要+窗口), 此处直接消费不再裁剪
@@ -261,16 +282,26 @@ async def _generate_node(state: AgentState) -> dict:
 
 
 async def _verify_node(state: AgentState) -> Command:
-    """LangGraph 1.x Command路由 — grounded+cite→END(kb_grounded), 不足→rewrite, 达上限→END降级免责."""
-    evidence = "\n\n".join(f"[{i+1}] {d.content}" for i, d in enumerate(state["documents"]))
+    """LangGraph 1.x Command路由 — 通过→END(kb_grounded); 失败按原因分流(评审修复):
+    证据缺信息(enough_evidence=false)→rewrite改写重检索; 证据够但答案没写好→直接重生成(带反馈);
+    达上限→END降级免责. 证据与generate同源(_format_evidence), chat_json解析失败不再误触重试."""
+    evidence = _format_evidence(state["documents"])
     try:
         ver = await chat_json([{"role": "user", "content": VERIFIER_PROMPT.format(
             question=state["question"], answer=state["generation"], evidence=evidence)}])
+        # ponytail: chat_json失败返回error dict(评审发现: 会被当"不grounded"误触两轮完整重跑)
+        if not isinstance(ver, dict) or "error" in ver:
+            ver = {"grounded": True, "citations_valid": True, "issue": "verifier解析失败跳过"}
     except Exception:
         ver = {"grounded": True, "citations_valid": True, "issue": "verifier跳过"}
     if ver.get("grounded") and ver.get("citations_valid"):
         return Command(update={"verification": ver, "source": "kb_grounded"}, goto=END)
-    if state.get("retry_count", 0) < MAX_RETRY:
+    retry = state.get("retry_count", 0)
+    if retry < MAX_RETRY:
+        if ver.get("enough_evidence"):
+            # 答案问题(没答好/引用错) → 重生成, retry在此自增(不走rewrite)
+            return Command(update={"verification": ver, "retry_count": retry + 1}, goto="generate")
+        # 证据缺口 → 改写查询重检索(retry由rewrite自增)
         return Command(update={"verification": ver}, goto="rewrite")
     # ponytail: 自纠达上限仍不grounded → 降级标未验证免责(诚实标注存疑)
     return Command(update={"verification": ver, "source": "fallback_unverified"}, goto=END)
@@ -301,10 +332,11 @@ def build_graph(retriever, memory_store=None, fact_store=None, context_max_chars
     wf.add_edge("retrieve", "grade")
     # ponytail: LangGraph 1.x Command声明式路由 — grade/verify节点内return Command(goto=...),
     # 替代旧 add_conditional_edges + 独立decide函数, 路由逻辑内聚到节点, 更简洁现代
+    # verify两条失败路径: 证据缺口→rewrite→retrieve→grade→generate; 答案问题→直达generate(带反馈)
     wf.add_edge("rewrite", "retrieve")
     wf.add_edge("generate", "verify")
 
-    # ponytail: with_allowlist 仅在 LANGGRAPH_STRICT_MSGPACK strict 模式下生效(宽容模式下serde合并是no-op),
-    # strict 默认值由 src/__init__.py 统一注入(实测 RetrievedDocument 白名单下 CRAG 全链路跑通)
-    checkpointer = MemorySaver().with_allowlist([("src.storage.protocol", "RetrievedDocument")])
-    return wf.compile(checkpointer=checkpointer)
+    # ponytail: checkpointer已移除(评审P2减法) — 多轮状态每次从MySQL重建, checkpoint唯一用途是
+    # 本次调用读回最终state(ainvoke/astream直接返回), 移除后连带消除MemorySaver驻留泄漏与
+    # msgpack strict环境变量注入(src/__init__.py)。未来若做HITL/断点恢复再以持久化saver回归。
+    return wf.compile()

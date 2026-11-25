@@ -112,8 +112,7 @@ async def test_grade_fallback_clears_documents(monkeypatch):
              "source": "", "mode": "kb", "safety": "allow", "user_id": "default",
              "memory_context": ""}
     cfg = {"configurable": {"thread_id": "test-fallback-clear"}}
-    await graph.ainvoke(state, config=cfg)
-    values = (await graph.aget_state(config=cfg)).values
+    values = await graph.ainvoke(state, config=cfg)  # checkpointer已移除, ainvoke直返最终state
     # 修复断言: 降级路径documents为空 → query.py构造的citations=[] (修复前返回无关doc_1)
     assert values.get("documents") == []
     assert values.get("search_decision") == "fallback"

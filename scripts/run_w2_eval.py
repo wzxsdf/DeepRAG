@@ -41,10 +41,12 @@ def _ms(v):
     return f"{v:.0f}" if isinstance(v, (int, float)) else "-"
 
 
-async def main():
+async def main(only: str = "all"):
+    """only: all(默认, 检索漏斗+CRAG全量) / retrieval(仅漏斗) / crag(仅CRAG, 用于生成侧改动验证提速)."""
     trial_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     print("=" * 104)
-    print(f"DeepRAG 消融+漏斗对照 trial={trial_id} (golden {GOLDEN_VERSION}: {len(GOLDEN)}问 × {len(DOCUMENTS)}文档)")
+    print(f"DeepRAG 消融+漏斗对照 trial={trial_id} (golden {GOLDEN_VERSION}: {len(GOLDEN)}问 × {len(DOCUMENTS)}文档"
+          f"{' · 仅CRAG' if only == 'crag' else ''})")
     print("=" * 104)
 
     writer = create_eval_writer()
@@ -53,21 +55,23 @@ async def main():
         n_docs = await ingest_eval_set(writer)
         print(f"评测集合 {writer.collection_name}: 入库 {n_docs} chunks\n")
 
-        for cfg, label in CONFIGS:
-            m = await eval_retrieval(cfg, writer)
-            rows.append({"config": label, **m, "faithfulness": None, "citation_acc": None})
-            print(f"  {label:<20} candR@5={_f(m.get('candidate_recall@5'))} candR@20={_f(m.get('candidate_recall@20'))} "
-                  f"R@1={m['recall@1']:.3f} R@5={m['recall@5']:.3f} MRR@5={m['mrr@5']:.3f} nDCG@5={m['ndcg@5']:.3f} "
-                  f"p50={_ms(m['p50_ms'])}ms p95={_ms(m['p95_ms'])}ms fallback={m.get('rerank_fallbacks', '-')}")
+        if only in ("all", "retrieval"):
+            for cfg, label in CONFIGS:
+                m = await eval_retrieval(cfg, writer)
+                rows.append({"config": label, **m, "faithfulness": None, "citation_acc": None})
+                print(f"  {label:<20} candR@5={_f(m.get('candidate_recall@5'))} candR@20={_f(m.get('candidate_recall@20'))} "
+                      f"R@1={m['recall@1']:.3f} R@5={m['recall@5']:.3f} MRR@5={m['mrr@5']:.3f} nDCG@5={m['ndcg@5']:.3f} "
+                      f"p50={_ms(m['p50_ms'])}ms p95={_ms(m['p95_ms'])}ms fallback={m.get('rerank_fallbacks', '-')}")
 
-        print("\n  +CRAG(agent工具检索, 含生成指标, 调LLM较慢)...")
-        crag = await eval_crag(writer)
-        rows.append({"config": "+CRAG", **crag, "candidate_recall@5": None, "candidate_recall@20": None,
-                     "rerank_fallbacks": None})
-        print(f"  {'+CRAG':<20} R@1={crag['recall@1']:.3f} R@5={crag['recall@5']:.3f} "
-              f"MRR@5={crag['mrr@5']:.3f} nDCG@5={crag['ndcg@5']:.3f} Faith={crag['faithfulness']:.3f} "
-              f"Cite={crag['citation_acc']:.3f} p50={_ms(crag['p50_ms'])}ms p95={_ms(crag['p95_ms'])}ms "
-              f"retried={crag['retried_n']}/{crag['n']}(共{crag['retries_total']}次) (n={crag['n']})")
+        if only in ("all", "crag"):
+            print("\n  +CRAG(agent工具检索, 含生成指标, 调LLM较慢)...")
+            crag = await eval_crag(writer)
+            rows.append({"config": "+CRAG", **crag, "candidate_recall@5": None, "candidate_recall@20": None,
+                         "rerank_fallbacks": None})
+            print(f"  {'+CRAG':<20} R@1={crag['recall@1']:.3f} R@5={crag['recall@5']:.3f} "
+                  f"MRR@5={crag['mrr@5']:.3f} nDCG@5={crag['ndcg@5']:.3f} Faith={crag['faithfulness']:.3f} "
+                  f"Cite={crag['citation_acc']:.3f} p50={_ms(crag['p50_ms'])}ms p95={_ms(crag['p95_ms'])}ms "
+                  f"retried={crag['retried_n']}/{crag['n']}(共{crag['retries_total']}次) (n={crag['n']})")
 
         trials_dir = os.path.join("docs", "trials")
         os.makedirs(trials_dir, exist_ok=True)
@@ -172,4 +176,5 @@ def _write_md(rows, trial_id, path):
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _only = "crag" if "--only" in sys.argv and "crag" in sys.argv else "all"
+    asyncio.run(main(_only))

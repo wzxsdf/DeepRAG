@@ -175,7 +175,8 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str
     for item in golden:
         cfg = {"configurable": {"thread_id": f"crag-{uuid.uuid4().hex}"}}
         started = time.perf_counter()
-        await graph.ainvoke(
+        # ponytail: checkpointer已移除(评审P2) — ainvoke直接返回最终state, 不再aget_state
+        values = await graph.ainvoke(
             {"question": item["q"], "query": item["q"], "tenant_id": "default", "retry_count": 0,
              "documents": [], "search_decision": "", "generation": "", "verification": None,
              "mode": "kb"},  # ponytail: 显式kb模式走CRAG检索闭环; 缺省quick会进tool_agent(联网), 与检索消融不可比
@@ -183,7 +184,6 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str
         )
         lat_ms = (time.perf_counter() - started) * 1000
         lats.append(lat_ms)
-        values = (await graph.aget_state(config=cfg)).values
         metrics = _metrics([doc.document_id for doc in values.get("documents", [])],
                            set(item["relevant"]))
         for key in agg:
