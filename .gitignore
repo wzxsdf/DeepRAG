@@ -2,6 +2,13 @@
 .env
 .env.local
 .env.*.local
+# 密钥/配置备份文件(.env.bak-juaiapi 等), 一律不入库
+.env.bak*
+.env.*
+!.env.example
+
+# ZCode 会话/工具中间产物
+.zcode/
 
 # Python
 __pycache__/

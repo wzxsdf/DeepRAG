@@ -17,12 +17,13 @@ load_dotenv()
 class HybridRetriever:
     """实现 Retriever Protocol. dense + BM25 服务端加权 RRF 融合."""
 
-    def __init__(self, qdrant=None, oss=None, mysql=None, settings=None):
+    def __init__(self, qdrant=None, oss=None, mysql=None, settings=None, resolve_active_versions: bool = True):
         # ponytail: 阶段5 — 存储实例注入(依赖倒置, lifespan建共享实例); None则settings兜底(兼容scripts)
         self._settings = settings or get_settings()
         self.qdrant = qdrant or QdrantWriter(cfg=self._settings.qdrant_cfg)
         self.oss = oss or OssStore(cfg=self._settings.oss_cfg)
         self._mysql_store = mysql or MySQLStore(cfg=self._settings.mysql_cfg)
+        self._resolve_active_versions = resolve_active_versions
 
     async def _resolve_active_version_ids(
         self,
@@ -46,7 +47,8 @@ class HybridRetriever:
     async def retrieve(self, query: str, filters: RetrievalFilter, top_k: int) -> List[RetrievedDocument]:
         dense = await embed_query(query)
         active_version_ids = filters.active_version_ids
-        if not filters.active_version_id and active_version_ids is None:
+        if (self._resolve_active_versions and not filters.active_version_id
+                and active_version_ids is None):
             active_version_ids = await self._resolve_active_version_ids(
                 filters.tenant_id, filters.kb_ids)
         if filters.active_version_id:

@@ -21,11 +21,12 @@ def _normalize_host(host: str) -> str:
 
 
 class QdrantWriter:
-    def __init__(self, cfg: QdrantCfg | None = None, host: str = "http://localhost", port: int = 6333, api_key: str = ""):
+    def __init__(self, cfg: QdrantCfg | None = None, host: str = "http://localhost", port: int = 6333,
+                 api_key: str = "", collection_name: str = "chunks"):
         if cfg is not None:  # ponytail: cfg注入(阶段1), 旧kwargs向后兼容
             host, port, api_key = cfg.host, cfg.port, cfg.api_key
         self.client = QdrantClient(url=f"{_normalize_host(host)}:{port}", api_key=api_key or None)
-        self.collection_name = "chunks"
+        self.collection_name = collection_name
 
     @staticmethod
     def _build_filter(
