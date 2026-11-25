@@ -1,6 +1,6 @@
 # W2消融矩阵: dense-only / +hybrid(RRF) / 漏斗对照(top5→rerank5 vs top20→rerank5) / +CRAG(agent)
 # 每次运行创建独占 eval_<uuid> Qdrant集合, 结束后仅清理本次集合; 报告写入 docs/trials/<trial_id>_* 不覆盖历史基线
-# 注意: 当前golden仅10问, 为smoke baseline, 数字不作为最终结论(样本量限制在报告中标注)
+# golden v2(>=50问×48文档)定版口径; CRAG行含重试计数与p95长尾归因(逐问题latency/retries/grounded)
 
 import asyncio
 import csv
@@ -17,7 +17,7 @@ if sys.platform == "win32":
 load_dotenv()
 
 from src.evaluation.ablation import create_eval_writer, delete_eval_collection, eval_crag, eval_retrieval, ingest_eval_set
-from src.evaluation.golden import GOLDEN
+from src.evaluation.golden import DISTRACTOR_IDS, DOCUMENTS, GOLDEN, GOLDEN_VERSION
 
 CONFIGS = [
     ("dense", "dense-only"),
@@ -26,7 +26,8 @@ CONFIGS = [
     ("funnel_top20_rerank5", "funnel top20->rerank5"),
 ]
 COLS = ["candidate_recall@5", "candidate_recall@20", "recall@1", "recall@5", "mrr@5", "ndcg@5",
-        "faithfulness", "citation_acc", "p50_ms", "p95_ms", "rerank_fallbacks"]
+        "faithfulness", "citation_acc", "p50_ms", "p95_ms", "rerank_fallbacks", "retries_total", "retried_n"]
+N_TOPICS = len(DOCUMENTS) - len(DISTRACTOR_IDS)
 
 
 def _f(v, default="-"):
@@ -43,7 +44,7 @@ def _ms(v):
 async def main():
     trial_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     print("=" * 104)
-    print(f"DeepRAG 消融+漏斗对照 trial={trial_id} (Golden N={len(GOLDEN)}, smoke baseline)")
+    print(f"DeepRAG 消融+漏斗对照 trial={trial_id} (golden {GOLDEN_VERSION}: {len(GOLDEN)}问 × {len(DOCUMENTS)}文档)")
     print("=" * 104)
 
     writer = create_eval_writer()
@@ -65,7 +66,8 @@ async def main():
                      "rerank_fallbacks": None})
         print(f"  {'+CRAG':<20} R@1={crag['recall@1']:.3f} R@5={crag['recall@5']:.3f} "
               f"MRR@5={crag['mrr@5']:.3f} nDCG@5={crag['ndcg@5']:.3f} Faith={crag['faithfulness']:.3f} "
-              f"Cite={crag['citation_acc']:.3f} p50={_ms(crag['p50_ms'])}ms p95={_ms(crag['p95_ms'])}ms (n={crag['n']})")
+              f"Cite={crag['citation_acc']:.3f} p50={_ms(crag['p50_ms'])}ms p95={_ms(crag['p95_ms'])}ms "
+              f"retried={crag['retried_n']}/{crag['n']}(共{crag['retries_total']}次) (n={crag['n']})")
 
         trials_dir = os.path.join("docs", "trials")
         os.makedirs(trials_dir, exist_ok=True)
@@ -103,11 +105,13 @@ def _write_md(rows, trial_id, path):
 
     label_cn = {"candidate_recall@5": "候选R@5", "candidate_recall@20": "候选R@20", "recall@1": "Recall@1",
                 "recall@5": "Recall@5", "mrr@5": "MRR@5", "ndcg@5": "nDCG@5", "faithfulness": "Faith★",
-                "citation_acc": "Cite★", "p50_ms": "p50(ms)", "p95_ms": "p95(ms)", "rerank_fallbacks": "fallback"}
+                "citation_acc": "Cite★", "p50_ms": "p50(ms)", "p95_ms": "p95(ms)", "rerank_fallbacks": "fallback",
+                "retries_total": "重试次", "retried_n": "重试问数"}
     lines = [
         "# DeepRAG 检索/生成 消融 + 漏斗对照",
         "",
-        f"> Trial: **{trial_id}** · Golden Set: **{len(GOLDEN)}** 问 × 16 文档(8主题+8语义近似干扰项), 独占评测集合.",
+        f"> Trial: **{trial_id}** · Golden {GOLDEN_VERSION}: **{len(GOLDEN)}** 问 × {len(DOCUMENTS)} 文档"
+        f"({N_TOPICS}主题+{len(DISTRACTOR_IDS)}语义近似干扰项), 独占评测集合.",
         "> 漏斗口径: hybrid召回 top_k → parent去重 → cross-encoder精排 → top5.",
         "> ★ Faith/Cite 为生成器自评(verifier), 检索指标为客观计算.",
         "",
@@ -143,12 +147,26 @@ def _write_md(rows, trial_id, path):
         lines.append(f"- rerank服务稳定性: 两个漏斗配置合计 fallback {fb}/{len(GOLDEN) * 2} 次(非0需检查rerank端点)。")
     if crag:
         lines.append(f"- CRAG Agent: R@5={_f(crag.get('recall@5'))} Faith={_f(crag.get('faithfulness'))} "
-                     f"Cite={_f(crag.get('citation_acc'))} p50={_ms(crag.get('p50_ms'))}ms(含LLM生成延迟)。")
-    lines += [
-        "",
-        f"**样本量限制**: 当前 golden 仅 {len(GOLDEN)} 问(smoke baseline), 单次运行, 指标差异在噪声范围内,",
-        "不作为简历/对外数字; golden v2(≥50条)定版后按同口径重跑替换本报告。",
-    ]
+                     f"Cite={_f(crag.get('citation_acc'))} p50={_ms(crag.get('p50_ms'))}ms(含LLM生成延迟); "
+                     f"重试 {crag.get('retries_total', 0)} 次 / {crag.get('retried_n', 0)} 问触发重试。")
+        tail = crag.get("tail") or []
+        if tail:
+            lines += ["", "### p95长尾归因(lat≥p95的问题, 按延迟降序)", "",
+                      "| 问题 | 延迟(ms) | 重试次数 | R@5 | grounded |",
+                      "|---|---|---|---|---|"]
+            for t in tail[:5]:
+                q = t["q"] if len(t["q"]) <= 24 else t["q"][:24] + "…"
+                lines.append(f"| {q} | {t['lat_ms']:.0f} | {t['retries']} | {_f(t.get('recall@5'))} "
+                             f"| {'✓' if t.get('grounded') else '✗'} |")
+            retried_share = (sum(1 for t in tail if t["retries"] > 0) / len(tail)) if tail else 0
+            lines += ["", f"长尾{len(tail)}问中 {retried_share:.0%} 触发agent重试; "
+                          f"重试占比高则长尾为重试共性问题(考虑收紧verifier阈值/检索置信度短路), "
+                          f"低则为个例波动。"]
+    v2_note = (f"golden {GOLDEN_VERSION} 定版口径({len(GOLDEN)}问×{len(DOCUMENTS)}文档); 单次运行仍受随机噪声影响, "
+               "对外引用前建议多轮运行取均值, 并按同口径保留trial记录以追踪基线漂移。") if GOLDEN_VERSION == "v2" else \
+        (f"当前 golden 仅 {len(GOLDEN)} 问(smoke baseline), 单次运行, 指标差异在噪声范围内, "
+         "不作为简历/对外数字; golden v2(≥50条)定版后按同口径重跑替换本报告。")
+    lines += ["", f"**样本量口径**: {v2_note}"]
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 

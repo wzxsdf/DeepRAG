@@ -163,14 +163,15 @@ async def eval_retrieval(config: str, writer: QdrantWriter) -> dict[str, float |
     }
 
 
-async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str, float | int]:
-    """Run CRAG with the isolated collection and end-to-end verification metrics."""
+async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str, Any]:
+    """Run CRAG with the isolated collection; per-question retries captured for p95 tail attribution."""
     golden = GOLDEN[:subset] if subset else GOLDEN
     retriever = HybridRetriever(qdrant=writer, resolve_active_versions=False)
     graph = build_graph(retriever)
     agg = {"recall@1": 0.0, "recall@5": 0.0, "mrr@5": 0.0, "ndcg@5": 0.0}
     faith = cite = 0.0
     lats: list[float] = []
+    per_question: list[dict[str, Any]] = []
     for item in golden:
         cfg = {"configurable": {"thread_id": f"crag-{uuid.uuid4().hex}"}}
         started = time.perf_counter()
@@ -180,7 +181,8 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str
              "mode": "kb"},  # ponytail: 显式kb模式走CRAG检索闭环; 缺省quick会进tool_agent(联网), 与检索消融不可比
             config=cfg,
         )
-        lats.append((time.perf_counter() - started) * 1000)
+        lat_ms = (time.perf_counter() - started) * 1000
+        lats.append(lat_ms)
         values = (await graph.aget_state(config=cfg)).values
         metrics = _metrics([doc.document_id for doc in values.get("documents", [])],
                            set(item["relevant"]))
@@ -189,11 +191,22 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str
         verification = values.get("verification") or {}
         faith += float(bool(verification.get("grounded")))
         cite += float(bool(verification.get("citations_valid")))
+        retries = int(values.get("retry_count") or 0)
+        per_question.append({"q": item["q"], "lat_ms": lat_ms, "retries": retries,
+                             "recall@5": metrics["recall@5"],
+                             "grounded": bool(verification.get("grounded"))})
     n = len(golden)
+    p95 = _pct(sorted(lats), 95)
+    # ponytail: p95长尾归因 - 超过p95阈值的问题逐条列出(重试次数/召回/grounded), 供判定长尾是否为重试共性问题
+    tail = sorted((r for r in per_question if r["lat_ms"] >= p95), key=lambda r: -r["lat_ms"])
+    retried_n = sum(1 for r in per_question if r["retries"] > 0)
     return {key: value / n for key, value in agg.items()} | {
         "faithfulness": faith / n,
         "citation_acc": cite / n,
         "p50_ms": _pct(sorted(lats), 50),
-        "p95_ms": _pct(sorted(lats), 95),
+        "p95_ms": p95,
+        "retries_total": sum(r["retries"] for r in per_question),
+        "retried_n": retried_n,
+        "tail": tail,
         "n": n,
     }
