@@ -1,5 +1,6 @@
 # 基线聚合: 扫描 docs/trials/*_w2_ablation.csv, 输出各配置指标 mean±std 到 docs/trials/baseline.md
-# 用法: python scripts/aggregate_baseline.py [trial_id ...]  (缺省=全部trial)
+# 用法: python scripts/aggregate_baseline.py [trial_id ...]  (缺省=全部golden v2口径trial)
+# 口径: 只聚合 md 头部带 "Golden v2" 标记的trial(smoke等历史口径排除, 不同golden数字不可平均)
 # 用途: 改动前后各跑N轮同口径评测, 对比本表判断回退/增益(单轮差异在噪声内, 以±std为准)
 import csv
 import statistics
@@ -18,11 +19,16 @@ FORMAT_INT = {"retries_total"}
 
 
 def load_trials(trial_ids=None):
-    """返回 [(trial_id, {config: {metric: float}})]; 数值列空串跳过."""
+    """返回 [(trial_id, {config: {metric: float}})]; 仅golden v2口径(显式指定trial_id时不过滤口径)."""
     trials = []
     for path in sorted(TRIALS_DIR.glob("*_w2_ablation.csv")):
         tid = path.name.split("_w2_ablation")[0]
         if trial_ids and tid not in trial_ids:
+            continue
+        md = TRIALS_DIR / path.name.replace(".csv", ".md")
+        # 不同golden口径的数字不可平均: 缺省只聚合 md 头部带 "Golden v2" 的trial
+        if not trial_ids and not (md.exists() and "Golden v2" in md.read_text(encoding="utf-8")[:400]):
+            print(f"- 跳过非golden v2口径trial: {tid}")
             continue
         rows = {}
         with open(path, encoding="utf-8") as f:
