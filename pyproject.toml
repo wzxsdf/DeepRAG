@@ -14,7 +14,7 @@ dependencies = [
     "aiomysql>=0.2.0",
     "redis>=5.2.0",
     "celery>=5.4.0",
-    "qdrant-client>=1.12.0",
+    "qdrant-client>=1.14.0",  # ponytail: >=1.14 才支持query_points服务端推理透传(Qdrant/bm25), 1.12会误走本地fastembed报错
     "oss2>=2.18.0",
     "docling>=0.22.0",
     "sentence-transformers>=3.0.0",
@@ -49,6 +49,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+# 默认只收集 tests/; scripts/ 下是独立运行的集成脚本(顶层asyncio.run+外部服务依赖),
+# 无参数pytest误收集会在import阶段创建aiomysql连接, 导致收集阶段崩溃
+testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.12"
