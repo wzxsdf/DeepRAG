@@ -31,8 +31,8 @@ copy .env.example .env
 # 5. 起API
 python -m apps.api.main
 
-# 6. 起Celery Worker (入库流水线)
-celery -A apps.worker.ingestion worker -l info
+# 6. 入库流水线为API进程内异步(BackgroundTasks), 无需单独Worker
+#    (原Celery方案因redis-py 8.0 RESP3与远程Redis HELLO不兼容已放弃, 见apps/worker/ingestion.py头注)
 ```
 
 访问 http://localhost:8000 → `/health` 查依赖状态，`/api/v1/query` 问答。
@@ -49,7 +49,9 @@ celery -A apps.worker.ingestion worker -l info
 | `scripts/test_parent_expansion.py` | 父块展开（child 命中 + parent 上下文） |
 | `scripts/test_multi_turn.py` | 多轮对话持久化 + 指代理解 |
 | `scripts/test_multi_hop.py` | Planner 多跳（子查询分解 + 并行融合） |
-| `scripts/run_w2_eval.py` | 消融矩阵 → `docs/w2_ablation.csv` |
+| `scripts/run_w2_eval.py` | golden v2 消融+漏斗对照 → `docs/trials/<trial_id>_w2_ablation.{csv,md}` |
+| `scripts/test_cache_invalidation.py` | 缓存 generation 失效链路(写→命中→入库/删除bump→不复用) |
+| `scripts/test_semantic_cache.py` | 语义缓存命中链路 + kb_ids scope 隔离 |
 
 ## 查询示例
 
