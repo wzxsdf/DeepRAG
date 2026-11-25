@@ -1,7 +1,6 @@
 # 时间工具 - 优化版
 
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 from pydantic import BaseModel, Field
 
 from langchain_core.tools import tool

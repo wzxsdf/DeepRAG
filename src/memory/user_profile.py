@@ -1,10 +1,8 @@
 # 用户偏好学习 - 个性化检索和推荐
 
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from datetime import datetime
+from typing import Dict, List, Any
 import json
-import hashlib
-from collections import defaultdict
 
 from src.core.logging import log
 

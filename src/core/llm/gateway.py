@@ -44,6 +44,11 @@ class ModelGateway:
             provider = model_str.split(":", 1)[0]
             pcfg = self._s.providers.get(provider)
             kwargs: dict = {"temperature": 0, "max_retries": 2}
+            # ponytail: purpose级输出token封顶(config默认0=不封顶); 长输出只在长尾出现, 封顶直接压p95
+            purpose_max_tokens = {"generate": self._s.chat_generate_max_tokens,
+                                  "fast": self._s.chat_fast_max_tokens}.get(purpose, 0)
+            if purpose_max_tokens > 0:
+                kwargs["max_tokens"] = purpose_max_tokens
             if pcfg:
                 if pcfg.api_key:
                     kwargs["api_key"] = pcfg.api_key

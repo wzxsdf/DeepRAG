@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     chat_fast_model: str = ""       # grade/judge/rewrite(快省)
     chat_reason_model: str = ""     # plan规划(推理)
 
+    # --- purpose级输出token封顶; 0=不封顶(旧行为) ---
+    # ponytail: CRAG回答为短事实+引用, 长输出只在长尾出现, 封顶直接压p95(golden v2实测长尾generate单节点最长12.5s)
+    chat_generate_max_tokens: int = 0
+    chat_fast_max_tokens: int = 0
+
     # --- Langfuse(LLM trace, 阶段2接ModelGateway); 三key齐全即启用 ---
     langfuse_host: str = ""
     langfuse_public_key: str = ""

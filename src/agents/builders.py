@@ -1,6 +1,5 @@
 # ponytail: Agent构建器 - 优化版，使用最新的LangChain 1.x API
 
-from typing import Optional
 from src.tools import REACT_AGENT_TOOLS
 from src.agents.middleware import ToolAuditMiddleware
 from src.prompts import TOOL_AGENT_PROMPT

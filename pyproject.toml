@@ -55,6 +55,8 @@ ignore = ["E501"]
 # 默认只收集 tests/; scripts/ 下是独立运行的集成脚本(顶层asyncio.run+外部服务依赖),
 # 无参数pytest误收集会在import阶段创建aiomysql连接, 导致收集阶段崩溃
 testpaths = ["tests"]
+# 显式固定异步fixture事件循环scope, 消除pytest-asyncio未来默认值变更的deprecation告警
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
 python_version = "3.12"

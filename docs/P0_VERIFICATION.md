@@ -23,6 +23,13 @@
 - **依赖修复(qdrant-client)**:1.12.1 → 1.19.1,`pyproject.toml` 下限提至 `>=1.14.0`。原因:`query_points` 对 `Qdrant/bm25` 的服务端推理透传需 client ≥1.14,1.12 误走本地 fastembed 报 `not among supported models`,导致 **hybrid(BM25 路)检索整体不可用**(P0 级问题);1.20 对 server 1.18.3 有 minor 差 2 的兼容警告,故固定 1.19。
 - **eval_crag 显式 `mode="kb"`**:缺省 mode=quick 会使 graph 进入 tool_agent(联网工具检索),与检索消融口径不可比;修复前 CRAG 行全 0(trial 20261125_002736,已删除该误导性产物)。
 
+### 基线追踪与生成侧 p95 实验(2026-11-25 第三轮)
+
+- **基线确立**:golden v2 同口径连跑 3 轮聚合([docs/trials/baseline.md](trials/baseline.md)):检索四行指标 **std=0.000**(入库+检索全链路确定性复现);CRAG R@1 0.938±0.010、p50 9474±161ms、p95 16394±1107ms、Faith/Cite 1.000±0.000、3 轮 0 次重试。后续改动前后各跑 N 轮对比此表判回退/增益(`scripts/aggregate_baseline.py`)。
+- **模型分级方向排除(预检)**:候选轻量模型热态 3 次中位延迟全部慢于现役 DeepSeek-V4.1-Flash(现役 5.1s vs GLM-5.3-Flash 13.0s / DeepSeek-V4-Flash 10.8s / Qwen3.5-27B 22s),换模型只会更慢。
+- **输出封顶 A/B(负结果)**:`CHAT_GENERATE_MAX_TOKENS=512`(trial `20261125_173308`):质量不降反升(R@1=0.963 全配置最高,Faith/Cite 1.000),**但 p95 29.3s 较基线 16.4s 恶化近一倍**——512 截断致 3 问答案被切断 → verifier 判不 grounded → 重试整轮生成放大长尾(长尾 3 问 100% 重试,重试埋点直接证明机制)。**结论:封顶默认关闭**(gateway 能力保留,`chat_generate_max_tokens=0` 为不封顶),输出长度不是安全的长尾杠杆;若复用需更高档位(如 1024)并带重试监控复测。
+- **p95 现状结论**:基线 p95≈16s 为 retrieve→grade→generate→verify 多节点 LLM 调用的固有延迟;感知层优化走 `/query/stream`(已具备),服务端无既不降质又压尾的安全杠杆。
+
 ### golden v2 定版与长尾归因(2026-11-25 第二轮)
 
 - **golden v2**:10 问 → 54 问(v1 十问原样保留,基线可对比),语料 16 → 48 文档(24 主题 + 24 语义近似干扰项)。语料扩充的必要性:v1 语料 16 文档时 top_k=20 可捞回全库,候选 R@20=1.000 是被语料规模饱和的假信号;48 文档后 top20≈42% 池子,headroom 读数才有意义。每主题至少 2 问,relevant 只允许主题文档,新增跨簇多 relevant 联动问(2~3 doc)。

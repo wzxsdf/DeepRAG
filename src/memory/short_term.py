@@ -7,7 +7,7 @@
 #
 # 对应设计文档 docs/MEMORY_LAYER_DESIGN.md §6.2(P0主方案: 滑动窗口 + 摘要)。
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Awaitable, Optional
 
 from src.core.logging import log

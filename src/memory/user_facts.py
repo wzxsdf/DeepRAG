@@ -7,7 +7,6 @@
 # C1: key 归一化(同义词→标准key, 防碎片化); G1: 敏感信息过滤(密码/token等不入库)。
 # 对应设计文档 docs/MEMORY_LAYER_DESIGN.md §4.2(实体记忆 user_facts 表) + §6.1(结构化抽取)。
 
-from typing import Optional
 
 from src.core.logging import log
 

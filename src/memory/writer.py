@@ -7,7 +7,6 @@
 # 对应设计文档 docs/MEMORY_LAYER_DESIGN.md §7.2(写阶段) + §6.1(结构化抽取压缩)。
 # 注: 一次 LLM 调用同时完成"抽取事实+判断价值+摘要"(三合一), 省 2 次调用。
 
-from typing import Optional
 
 from src.core.logging import log
 
@@ -96,13 +95,6 @@ class MemoryWriter:
             user_id, summary, memory_type="episodic", metadata={"source": source}
         )
         return mem_id is not None
-
-        log.info(
-            "memory_written", user_id=user_id,
-            facts=stats["facts_written"], long_term=stats["long_term_written"],
-            memorable=res.get("memorable"), source=source,
-        )
-        return stats
 
     async def _extract(self, question: str, answer: str) -> dict:
         """LLM 三合一抽取: facts + memorable + summary。走 fast purpose(轻量)。"""
