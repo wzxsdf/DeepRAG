@@ -35,8 +35,8 @@ class QueryCache:
         redis_url: str = "redis://localhost:6379/1",
         ttl: int = 3600,  # 1小时过期
         max_size: int = 1000,  # 最大缓存数量
-        enable_semantic: bool = True,  # 是否启用语义相似度缓存
-        semantic_threshold: float = 0.85  # 语义相似度阈值
+        enable_semantic: bool = False,  # ponytail: 评审修复(20261126)默认关闭 — 词袋重叠方案词序/否定词盲,
+        semantic_threshold: float = 0.85  # 实测"Redis支持持久化吗"与"不支持"相似度0.95误命中; 置true回旧行为
     ):
         self.redis_url = redis_url
         self.ttl = ttl
@@ -273,6 +273,9 @@ class QueryCache:
         """
         # 这里简化实现：在实际应用中需要向量相似度计算
         # 使用简单的关键词匹配作为替代
+        # ponytail: 已知缺陷(评审20261126, 默认已关闭enable_semantic): 关键词集合无序 —
+        # "北京到上海"与"上海到北京"、"支持持久化"与"不支持持久化"关键词完全一致, 必然误命中。
+        # 升级路径: 问题向量化+ANN(参照GPTCache), 见设计讨论 roadmap B2。
 
         try:
             # 获取偏好学习器
@@ -614,11 +617,13 @@ class HybridCache:
         self,
         redis_url: str = "redis://localhost:6379",
         query_cache_ttl: int = 3600,
-        document_cache_ttl: int = 7200
+        document_cache_ttl: int = 7200,
+        enable_semantic: bool = False,  # ponytail: 透传QueryCache(默认关, 见QueryCache注释)
     ):
         self.query_cache = QueryCache(
             redis_url=f"{redis_url}/1",
-            ttl=query_cache_ttl
+            ttl=query_cache_ttl,
+            enable_semantic=enable_semantic,
         )
         self.document_cache = DocumentCache(
             redis_url=f"{redis_url}/2",
@@ -718,6 +723,7 @@ def get_hybrid_cache(
     if _hybrid_cache is None:
         _hybrid_cache = HybridCache(
             redis_url=redis_url or settings.redis_url,
+            enable_semantic=settings.cache_semantic_enabled,  # ponytail: env CACHE_SEMANTIC_ENABLED, 默认false
             **kwargs
         )
 
