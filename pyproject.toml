@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "langgraph>=1.0.0",
     "langchain>=1.0.0",
+    "langchain-openai>=1.4.0",  # ponytail: ModelGateway init_chat_model("openai:...")必需, 未声明会漏装(20261125评测-I隔离模式实测踩坑)
     "litellm>=1.50.0",
     "pymysql>=1.1.0",
     "aiomysql>=0.2.0",
