@@ -1,0 +1,2 @@
+config,candidate_recall@5,candidate_recall@20,recall@1,recall@5,mrr@5,ndcg@5,faithfulness,citation_acc,p50_ms,p95_ms,rerank_fallbacks,retries_total,retried_n,n
++CRAG,,,0.944,0.935,0.963,0.937,1.000,1.000,8260.176,14563.203,,0,0,54

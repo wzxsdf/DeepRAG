@@ -23,6 +23,35 @@
 - **依赖修复(qdrant-client)**:1.12.1 → 1.19.1,`pyproject.toml` 下限提至 `>=1.14.0`。原因:`query_points` 对 `Qdrant/bm25` 的服务端推理透传需 client ≥1.14,1.12 误走本地 fastembed 报 `not among supported models`,导致 **hybrid(BM25 路)检索整体不可用**(P0 级问题);1.20 对 server 1.18.3 有 minor 差 2 的兼容警告,故固定 1.19。
 - **eval_crag 显式 `mode="kb"`**:缺省 mode=quick 会使 graph 进入 tool_agent(联网工具检索),与检索消融口径不可比;修复前 CRAG 行全 0(trial 20261125_002736,已删除该误导性产物)。
 
+### CRAG 真纠错改造 + P2 减法(2026-11-26 第五轮)
+
+**① CRAG 循环改真纠错**(`src/agents/graph.py` + `src/prompts/crag.py`, 修复评审发现"循环不纠错"):
+- rewrite 携带失败上下文: verifier `issue` + 已试证据摘要 + 对话历史(旧实现只看原问题, 温度 0 下重复同一改写);
+- verify 新增 `enough_evidence` 判定并按因分流: **证据缺口**→rewrite 改写重检索; **证据够但答案没写好**→直达 generate 重生成且 prompt 携带 verifier 反馈(温度 0 下无反馈重试只会逐字复现同一答案);
+- generate/verify 证据同源 `_format_evidence`(旧 verify 缺父块上下文, 两侧证据集不一致);
+- `chat_json` 解析失败返回的 error dict 不再被当"不 grounded"误触两轮完整重跑。
+
+**② checkpointer 移除**(P2 减法): 多轮状态每次从 MySQL 重建, checkpoint 唯一用途是本次读回最终 state——`ainvoke`/`astream` 直接返回。连带消除: MemorySaver 驻留泄漏(实测≈13.7KB/会话全量累积)、`LANGGRAPH_STRICT_MSGPACK` 环境变量注入(`src/__init__.py`)、`RetrievedDocument` msgpack 白名单遗留检查项。6 处 `aget_state` 消费方(query 两路/ablation/2 脚本/单测)改为 `ainvoke` 直返或 updates 流累积。
+
+**③ 死代码与依赖裁剪**: 删 `src/agents/tools.py`(445 行, import 即失败并拖坏 4 个脚本→已改指向活模块)、memory 设计稿三件套 conversation/user_profile/retriever(~1.4k 行自述"未接入")、`storage/pg.py`+schema(DESIGN.md 遗留, PostgreSQL 从未启用)、`src/core/llm.py`(被同名包遮蔽的 shim)、`DocumentCache`(185 行无调用方)。依赖移除 litellm/celery/docling/pymysql/python-multipart/sentence-transformers/FlagEmbedding/ragas(运行时零 import), 补显式声明 python-dotenv; **干净安装不再拉 torch**(import src.agents.graph 冷启动 12.0s→2.7s 实测)。`.env.example` 补 `JWT_SECRET`(部署必设)/`CACHE_SEMANTIC_ENABLED`, 删 Celery 段。
+
+**④ 回归验证(golden v2 同口径, trial=`20261126_013003`**, [docs/trials/20261126_013003_w2_ablation.md](trials/20261126_013003_w2_ablation.md)**)**:
+
+| 指标 | baseline.md(3轮均值) | 本次 | 判定 |
+|---|---|---|---|
+| R@1 | 0.938±0.010 | 0.944 | 噪声带内(=历史最佳单轮) |
+| R@5 / MRR@5 / nDCG@5 | 0.935 / 0.963 / 0.937 | 0.935 / 0.963 / 0.937 | 逐位持平 |
+| Faith / Cite | 1.000 | 1.000 | 持平 |
+| p50 | 9474±161ms | **8260ms(-12%)** | 改善, 超出噪声带 |
+| p95 | 16394±1107ms | **14563ms(-11%)** | 改善, 超出噪声带 |
+| 重试 | 0/54 | 0/54 | 持平 |
+
+读数: 纠错分流逻辑为**潜伏能力**(golden v2 全可答, verifier 全过 → 0 重试不触发), 质量指标无回退; p50/p95 改善 11-12% 主要来自 checkpointer 移除(每 superstep 不再做 checkpoint 序列化/白名单合并), 单次运行结论, 多轮均值追踪交由后续 trial。纠错路径的行为正确性由离线假对象单测锁定(`tests/unit/test_correctness_fixes.py`)。
+
+**单元回归**: `pytest tests -q` → 41 passed; ruff E9/F passed; `import apps.api.main` / `src.memory` / `src.cache` / `src.evaluation.ablation` OK; 死引用 grep 干净(仅存"已删"注释)。main CI: run 45665327202 success。
+
+**遗留(P3, 待定方向)**: 多租户贯通 vs 诚实单租户(二选一); 记忆系统开关 A/B 定去留; 入库 BackgroundTasks 持久化队列(用 `indexing_jobs` 表做 SKIP LOCKED 认领); ReAct 工具结果 150 字符截断上调; 评测效度补齐(参考答案/不可答集/独立 judge/关键词型查询)。
+
 ### 设计评审修复: 六项正确性缺陷(2026-11-26 第四轮)
 
 评审方法: 通读全部核心模块 + 只读复现脚本离线坐实(LLM/Qdrant/OSS 全假对象替换, 不动真实服务), 每项缺陷转化为 `tests/unit/test_correctness_fixes.py` 回归断言。
