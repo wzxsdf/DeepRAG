@@ -7,30 +7,27 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.0",  # ponytail: 全仓库load_dotenv直接import(此前仅靠pydantic-settings传递依赖, 评审20261126补显式声明)
     "sse-starlette>=2.0.0",  # ponytail: /query/stream的EventSourceResponse(评审20261126补声明, 此前仅环境实装)
     "langgraph>=1.0.0",
     "langchain>=1.0.0",
     "langchain-openai>=1.4.0",  # ponytail: ModelGateway init_chat_model("openai:...")必需, 未声明会漏装(20261125评测-I隔离模式实测踩坑)
-    "litellm>=1.50.0",
-    "pymysql>=1.1.0",
     "aiomysql>=0.2.0",
     "passlib>=1.7.4",  # ponytail: auth.py密码哈希(评审20261126补声明, 干净环境装完起不来)
     "bcrypt>=4.0.0",  # ponytail: passlib bcrypt scheme后端
     "python-jose[cryptography]>=3.3.0",  # ponytail: JWT签发/校验(同上补声明)
     "PyMuPDF>=1.24.0",  # ponytail: 入库解析(import fitz; Docling弃用后实际解析器, 此前未声明)
     "redis>=5.2.0",
-    "celery>=5.4.0",
     "qdrant-client>=1.14.0",  # ponytail: >=1.14 才支持query_points服务端推理透传(Qdrant/bm25), 1.12会误走本地fastembed报错
     "oss2>=2.18.0",
-    "docling>=0.22.0",
-    "sentence-transformers>=3.0.0",
-    " FlagEmbedding>=1.2.0",
-    "ragas>=0.2.0",
     "langfuse>=2.50.0",
     "structlog>=24.0.0",
     "httpx[sse]>=0.28.0",
-    "python-multipart>=0.0.12",
     "jieba>=0.42.1",
+    # === 20261126 评审P2裁剪(运行时代码零import, 干净安装不再拉torch, import src.agents.graph 12.0s→2.7s实测) ===
+    # litellm(网关走langchain-openai; LITELLM_*仅为env字段名保留) / celery(入库已改进程内异步)
+    # docling(解析已换PyMuPDF) / pymysql(唯一驱动是aiomysql) / python-multipart(无Form/File路由)
+    # sentence-transformers+FlagEmbedding(仅死代码引用, 已删) / ragas(独立judge落地时再按需装回)
 ]
 
 [project.optional-dependencies]

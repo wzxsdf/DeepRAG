@@ -1,7 +1,7 @@
 # ponytail: 迁移核心验证 — create_agent 构建 + run_react_agent 端到端(不经后端, 直测)
 import asyncio
 from src.retrieval.hybrid import HybridRetriever
-from src.agents.tools import run_react_agent
+from src.agents.react_agent import run_react_agent  # ponytail: agents/tools.py已删(评审P2死代码)
 
 
 async def main():

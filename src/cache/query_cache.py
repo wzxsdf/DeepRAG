@@ -425,209 +425,20 @@ class QueryCache:
         return count
 
 
-class DocumentCache:
-    """文档缓存 - 知识库文档内容缓存
-
-    策略：
-    - 文档级别缓存：整个文档的内容缓存
-    - 分块缓存：文档chunks的缓存
-    - 自动预热：常用文档预加载
-    - 智能失效：文档更新时自动失效
-    """
-
-    def __init__(
-        self,
-        redis_url: str = "redis://localhost:6379/2",
-        ttl: int = 7200,  # 2小时过期
-        max_size: int = 500  # 最大文档缓存数量
-    ):
-        self.redis_url = redis_url
-        self.ttl = ttl
-        self.max_size = max_size
-        self._redis_client = None
-
-    async def _get_redis(self) -> redis.Redis:
-        """获取Redis客户端"""
-        if self._redis_client is None:
-            self._redis_client = await redis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True
-            )
-        return self._redis_client
-
-    def _generate_cache_key(
-        self,
-        document_id: str,
-        chunk_id: Optional[str] = None,
-        tenant_id: Optional[str] = None
-    ) -> str:
-        """生成文档缓存键
-
-        Args:
-            document_id: 文档ID
-            chunk_id: 分块ID（可选）
-            tenant_id: 租户ID
-
-        Returns:
-            str: 缓存键
-        """
-        if chunk_id:
-            return f"doc_cache:{tenant_id or 'default'}:{document_id}:{chunk_id}"
-        return f"doc_cache:{tenant_id or 'default'}:{document_id}"
-
-    async def get_document(
-        self,
-        document_id: str,
-        tenant_id: str = "default"
-    ) -> Optional[Dict[str, Any]]:
-        """获取文档缓存
-
-        Args:
-            document_id: 文档ID
-            tenant_id: 租户ID
-
-        Returns:
-            Dict: 文档缓存数据，未命中返回None
-        """
-        cache_key = self._generate_cache_key(document_id, tenant_id=tenant_id)
-
-        redis_client = await self._get_redis()
-
-        try:
-            cached = await redis_client.get(cache_key)
-            if cached:
-                log.info("document_cache_hit", doc_id=document_id[:16] + "...")
-                return json.loads(cached)
-            return None
-
-        except Exception as e:
-            log.warning("document_cache_get_failed", doc_id=document_id[:16] + "...", error=str(e))
-            return None
-
-    async def set_document(
-        self,
-        document_id: str,
-        document_data: Dict[str, Any],
-        tenant_id: str = "default",
-        ttl: Optional[int] = None
-    ) -> bool:
-        """设置文档缓存
-
-        Args:
-            document_id: 文档ID
-            document_data: 文档数据
-            tenant_id: 租户ID
-            ttl: 过期时间（可选）
-
-        Returns:
-            bool: 是否设置成功
-        """
-        cache_key = self._generate_cache_key(document_id, tenant_id=tenant_id)
-
-        redis_client = await self._get_redis()
-
-        try:
-            cache_data = {
-                "document_id": document_id,
-                "document_data": document_data,
-                "tenant_id": tenant_id,
-                "cached_at": datetime.now().isoformat(),
-                "ttl": ttl or self.ttl
-            }
-
-            # 检查缓存大小
-            await self._ensure_cache_size()
-
-            await redis_client.setex(
-                cache_key,
-                ttl or self.ttl,
-                json.dumps(cache_data)
-            )
-
-            log.info("document_cache_set", doc_id=document_id[:16] + "...", ttl=ttl or self.ttl)
-            return True
-
-        except Exception as e:
-            log.warning("document_cache_set_failed", doc_id=document_id[:16] + "...", error=str(e))
-            return False
-
-    async def invalidate_document(
-        self,
-        document_id: str,
-        tenant_id: str = "default"
-    ) -> bool:
-        """使文档缓存失效
-
-        Args:
-            document_id: 文档ID
-            tenant_id: 租户ID
-
-        Returns:
-            bool: 是否删除成功
-        """
-        # 删除主文档缓存
-        doc_key = self._generate_cache_key(document_id, tenant_id=tenant_id)
-
-        # 删除所有分块缓存
-        pattern = f"doc_cache:{tenant_id}:{document_id}:*"
-
-        redis_client = await self._get_redis()
-
-        try:
-            # 删除主缓存
-            await redis_client.delete(doc_key)
-
-            # 删除所有分块缓存
-            async for key in redis_client.scan_iter(match=pattern, count=100):
-                await redis_client.delete(key)
-
-            log.info("document_cache_invalidated", doc_id=document_id[:16] + "...")
-            return True
-
-        except Exception as e:
-            log.warning("document_cache_invalidate_failed", doc_id=document_id[:16] + "...", error=str(e))
-            return False
-
-    async def _ensure_cache_size(self) -> None:
-        """确保缓存大小在限制内"""
-        redis_client = await self._get_redis()
-
-        # 获取当前文档缓存大小
-        pattern = "doc_cache:*"
-        current_size = 0
-
-        async for key in redis_client.scan_iter(match=pattern, count=100):
-            current_size += 1
-
-        # 如果超过最大大小，删除最老的缓存
-        if current_size >= self.max_size:
-            # 这里简化处理：删除部分缓存
-            # 在实际应用中可以按访问时间排序
-            keys_to_delete = list(redis_client.scan_iter(match=pattern, count=50))
-
-            for key in keys_to_delete[:(current_size - self.max_size)]:
-                await redis_client.delete(key)
-
-
 class HybridCache:
-    """混合缓存管理器 - 查询缓存 + 文档缓存"""
+    """混合缓存管理器 — 查询缓存门面.
+    ponytail: DocumentCache已删(评审P2: 185行无任何调用方的死代码, 文档内容本就经Qdrant payload零IO直取)."""
 
     def __init__(
         self,
         redis_url: str = "redis://localhost:6379",
         query_cache_ttl: int = 3600,
-        document_cache_ttl: int = 7200,
         enable_semantic: bool = False,  # ponytail: 透传QueryCache(默认关, 见QueryCache注释)
     ):
         self.query_cache = QueryCache(
             redis_url=f"{redis_url}/1",
             ttl=query_cache_ttl,
             enable_semantic=enable_semantic,
-        )
-        self.document_cache = DocumentCache(
-            redis_url=f"{redis_url}/2",
-            ttl=document_cache_ttl
         )
 
     async def get_query_result(
@@ -662,40 +473,13 @@ class HybridCache:
         """使租户范围内的查询缓存失效，包括语义缓存候选."""
         return await self.query_cache.bump_generation(tenant_id)
 
-    async def get_document(self, document_id: str, tenant_id: str = "default") -> Optional[Dict[str, Any]]:
-        """获取文档缓存"""
-        return await self.document_cache.get_document(document_id, tenant_id)
+    async def get_stats(self) -> CacheStats:
+        """获取缓存统计"""
+        return await self.query_cache.get_stats()
 
-    async def set_document(
-        self,
-        document_id: str,
-        document_data: Dict[str, Any],
-        tenant_id: str = "default",
-        ttl: Optional[int] = None
-    ) -> bool:
-        """设置文档缓存"""
-        return await self.document_cache.set_document(document_id, document_data, tenant_id, ttl)
-
-    async def invalidate_document(self, document_id: str, tenant_id: str = "default") -> bool:
-        """使文档缓存失效"""
-        return await self.document_cache.invalidate_document(document_id, tenant_id)
-
-    async def get_stats(self) -> Dict[str, CacheStats]:
-        """获取所有缓存统计"""
-        query_stats = await self.query_cache.get_stats()
-        return {
-            "query_cache": query_stats,
-            "document_cache": CacheStats(size=0)  # 文档缓存统计可以后续添加
-        }
-
-    async def clear_all(self) -> Dict[str, int]:
+    async def clear_all(self) -> int:
         """清空所有缓存"""
-        query_count = await self.query_cache.clear_all()
-        # 文档缓存清理可以后续添加
-        return {
-            "query_cache": query_count,
-            "document_cache": 0
-        }
+        return await self.query_cache.clear_all()
 
 
 # 全局单例
@@ -732,7 +516,6 @@ def get_hybrid_cache(
 
 __all__ = [
     "QueryCache",
-    "DocumentCache",
     "HybridCache",
     "get_hybrid_cache"
 ]

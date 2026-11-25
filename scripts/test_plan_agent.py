@@ -2,7 +2,7 @@
 # 路由层(agent模式简单/多源分发)的端到端验证在 test_modes.py; 此处专注 plan_agent 自身
 import asyncio
 from src.retrieval.hybrid import HybridRetriever
-from src.agents.tools import run_plan_agent
+from src.agents.plan_agent import run_plan_agent  # ponytail: agents/tools.py已删(评审P2死代码)
 
 
 async def main():

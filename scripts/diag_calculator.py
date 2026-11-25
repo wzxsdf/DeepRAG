@@ -1,4 +1,4 @@
-from src.agents.tools import calculate
+from src.tools import calculate  # ponytail: agents/tools.py已删(评审P2死代码), 工具真身统一在src.tools
 
 def main():
     # 正确性

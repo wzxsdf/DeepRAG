@@ -1,5 +1,5 @@
 import asyncio
-from src.agents.tools import get_weather
+from src.tools import get_weather  # ponytail: agents/tools.py已删(评审P2死代码)
 
 async def main():
     for city in ["北京", "Shanghai", "不存在的城市XYZ"]:
