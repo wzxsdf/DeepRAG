@@ -319,6 +319,8 @@ def build_graph(retriever, memory_store=None, fact_store=None, context_max_chars
     wf.add_edge("rewrite", "retrieve")
     wf.add_edge("generate", "verify")
 
+    # ponytail: with_allowlist 仅在 LANGGRAPH_STRICT_MSGPACK strict 模式下生效(宽容模式下serde合并是no-op),
+    # strict 默认值由 src/__init__.py 统一注入(实测 RetrievedDocument 白名单下 CRAG 全链路跑通)
     checkpointer = MemorySaver().with_allowlist([("src.storage.protocol", "RetrievedDocument")])
     return wf.compile(checkpointer=checkpointer)
 
