@@ -2,7 +2,6 @@
 
 from typing import Any, Dict, Optional
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import BaseMessage
 from src.core.logging import log
 
 

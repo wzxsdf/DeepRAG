@@ -1,7 +1,7 @@
 # 对话记忆管理 - Redis+MySQL混合存储
 
-from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from datetime import datetime
+from typing import List, Dict, Any
 import redis.asyncio as redis
 import json
 import hashlib
@@ -404,7 +404,6 @@ class ConversationMemory:
                 metadata_json = await redis_client.get(key)
                 if metadata_json:
                     metadata = json.loads(metadata_json)
-                    session_id = metadata.get("session_id")
 
                     # 过滤条件
                     if activity_since:

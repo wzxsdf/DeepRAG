@@ -1,5 +1,6 @@
 # 记忆检索器 - 语义相似度 + 时间权重
 
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import numpy as np

@@ -10,7 +10,7 @@ from langgraph.types import Command
 
 from src.agents.llm import chat, chat_json, chat_stream
 from src.prompts import (GRADER_BATCH_PROMPT, GENERATOR_PROMPT, VERIFIER_PROMPT, REWRITE_PROMPT,
-    CHITCHAT_PROMPT, OPEN_ANSWER_FALLBACK_PROMPT, AGENT_COMPLEX_JUDGE_PROMPT)
+    CHITCHAT_PROMPT, AGENT_COMPLEX_JUDGE_PROMPT)
 from src.storage.protocol import RetrievedDocument
 from src.core.logging import log
 

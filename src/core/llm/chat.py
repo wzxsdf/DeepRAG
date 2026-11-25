@@ -3,10 +3,9 @@
 import json
 import re
 from typing import Any, Optional
-from pydantic import BaseModel, create_model
+from pydantic import create_model
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_core.language_models import BaseChatModel
 
 from src.core.llm.gateway import get_gateway
 
