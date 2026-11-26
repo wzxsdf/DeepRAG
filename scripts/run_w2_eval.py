@@ -43,8 +43,21 @@ def _ms(v):
     return f"{v:.0f}" if isinstance(v, (int, float)) else "-"
 
 
+def _keep_system_awake(enable: bool):
+    """评测期间阻止Windows进入待机(20261126实测: 机器待机会静默杀死20min+长跑,
+    日志冻结在半途且无Traceback). ES_CONTINUOUS|ES_SYSTEM_REQUIRED, 挂在主asyncio线程;
+    非Windows平台no-op."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(
+        ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if enable else 0))
+
+
 async def main(only: str = "all"):
     """only: all(默认, 检索漏斗+CRAG全量) / retrieval(仅漏斗) / crag(仅CRAG, 用于生成侧改动验证提速)."""
+    _keep_system_awake(True)
     trial_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     print("=" * 104)
     print(f"DeepRAG 消融+漏斗对照 trial={trial_id} (golden {GOLDEN_VERSION}: {len(GOLDEN)}问 × {len(DOCUMENTS)}文档"
@@ -96,6 +109,7 @@ async def main(only: str = "all"):
         print(f"\n✓ 已存 {csv_path} + {md_path}")
     finally:
         delete_eval_collection(writer)
+        _keep_system_awake(False)
         print(f"✓ 已清理本次评测集合 {writer.collection_name}")
 
 
