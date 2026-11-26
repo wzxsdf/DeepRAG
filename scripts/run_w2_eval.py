@@ -165,7 +165,9 @@ def _write_md(rows, trial_id, path, una=None):
 
     label_cn = {"candidate_recall@5": "候选R@5", "candidate_recall@20": "候选R@20", "recall@1": "Recall@1",
                 "recall@5": "Recall@5", "mrr@5": "MRR@5", "ndcg@5": "nDCG@5", "faithfulness": "Faith★",
-                "citation_acc": "Cite★", "p50_ms": "p50(ms)", "p95_ms": "p95(ms)", "rerank_fallbacks": "fallback",
+                "citation_acc": "Cite★", "judge_answer": "Judge答准★", "judge_grounded": "Judge支撑★",
+                "judge_citation": "Judge引用★", "judge_n": "judge n",
+                "p50_ms": "p50(ms)", "p95_ms": "p95(ms)", "rerank_fallbacks": "fallback",
                 "retries_total": "重试次", "retried_n": "重试问数"}
     lines = [
         "# DeepRAG 检索/生成 消融 + 漏斗对照",
