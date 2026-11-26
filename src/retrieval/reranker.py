@@ -59,7 +59,9 @@ async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> L
     try:
         ranked = await _call()
         top1 = max((d.score for d in ranked), default=0.0)
-        if ranked and top1 < 0.05:  # 全低分 → 疑似退化响应, 重试一次
+        # ponytail: 触发线0.30与grade阈值同线 — 退化响应实测跨0~0.2分段(20261127凌晨: 纯零重试后
+        # 仍出现0.1x分段退化, 漏过旧触发线0.05, 致~10问被阈值误杀短路), <0.30的可疑全低分都重试一次
+        if ranked and top1 < 0.30:
             log.warning("rerank_suspicious_low_retry", top1=round(top1, 4), n=len(ranked))
             retry = await _call()
             retry_top1 = max((d.score for d in retry), default=0.0)
