@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     # 0=关闭短路(旧行为)。
     retrieval_min_score: float = 0.30
 
+    # --- hybrid稀疏路权重(20261126扫参后下调) ---
+    # RRf扫参(golden v3 62问): sparse权重0.15与纯dense逐位持平; 0.35(旧默认)R@1 -1.6pt;
+    # 0.5/0.7 -3.2pt — 单调恶化, 无任何权重赢dense。短文档语料精确token即主题词, dense足够。
+    # 默认0.15: 生产≈dense(实证最优), 稀疏路保留应对真实长文档语料; 0=纯dense。
+    retrieval_sparse_weight: float = 0.15
+
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)
     memory_max_context_tokens: int = 2000    # 历史占用token预算; 超过才触发摘要+窗口

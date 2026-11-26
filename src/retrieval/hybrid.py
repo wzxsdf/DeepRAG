@@ -58,6 +58,8 @@ class HybridRetriever:
             limit=top_k, acl_tags=filters.acl_tags,
             active_version_id=filters.active_version_id,
             active_version_ids=active_version_ids,
+            weights=[1.0 - self._settings.retrieval_sparse_weight,
+                     self._settings.retrieval_sparse_weight],  # ponytail: 扫参定0.15(≈dense最优), 见config注释
         )
 
         # ponytail: content优先取Qdrant payload(零IO); 仅老数据(无content payload)才查MySQL回拉OSS。

@@ -1,13 +1,14 @@
 # DeepRAG
 
-基于 LangGraph 的 **Agentic RAG 系统** —— CRAG 纠正式检索（dense+BM25 混合检索 + 加权 RRF + Cross-Encoder 重排 + 自纠状态机），支持 Planner 多跳、父子分块父块展开、多轮对话。
+基于 LangGraph 的 **Agentic RAG 系统** —— CRAG 纠正式检索（BGE-M3 dense + Cross-Encoder 重排 + 检索评估-生成-校验自纠状态机），支持 Planner 多跳、父子分块父块展开、多轮对话。
+hybrid（Qdrant 原生 BM25 sparse + 加权 RRF）已实现并经 golden v3 消融：短文档语料上 sparse 路无增益（权重单调恶化），生产默认 sparse 权重 0.15（≈纯 dense 实证最优），`RETRIEVAL_SPARSE_WEIGHT` 可调。
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
-| Agent | LangGraph 1.x LTS（StateGraph + Command 声明式路由 + route 多跳 + MemorySaver） |
-| 检索 | BGE-M3 dense（SiliconFlow API）+ Qdrant 原生 BM25 sparse + 加权 RRF + BGE-Reranker（Cross-Encoder） |
+| Agent | LangGraph 1.x LTS（StateGraph + Command 声明式路由 + MemorySaver） |
+| 检索 | BGE-M3 dense（SiliconFlow API）+ Cross-Encoder 精排（BGE-Reranker）；hybrid BM25 路可配（消融见 docs/trials） |
 | 文档 | Docling 解析 + 父子分块（parent-child chunking） |
 | 存储 | MySQL 8.0（元数据/状态/对话）+ 阿里云 OSS（文件/chunks/父块）+ Qdrant（dense+sparse）+ Redis |
 | 服务 | FastAPI + Celery（异步入库流水线） |
