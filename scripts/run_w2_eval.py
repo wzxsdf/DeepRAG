@@ -70,6 +70,7 @@ async def main(only: str = "all", resumable: bool = False, max_q: str | None = N
 
     ckpt = os.path.join(tempfile.gettempdir(), "deeprag_eval_crag_ckpt.jsonl") if resumable else None
     rows: list[dict] = []
+    crag, una = {}, None  # ponytail: retrieval-only模式也要定义(修复UnboundLocalError@_write_md)
     if merge_from:  # 预载漏斗行(检索确定性, 数字与重跑逐位一致)
         import csv as _csv
         with open(merge_from, encoding="utf-8") as f:
