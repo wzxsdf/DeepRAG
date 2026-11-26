@@ -20,6 +20,9 @@ from src.prompts.agent import (
     ABSTRACT_PROMPT,
 )
 
+# 评测judge提示词(独立评审, 与被评系统异模型)
+from src.prompts.eval_judge import JUDGE_PROMPT
+
 __all__ = [
     # CRAG
     "GRADER_PROMPT",
@@ -35,4 +38,6 @@ __all__ = [
     "OPEN_ANSWER_FALLBACK_PROMPT",
     "FACT_EXTRACT_PROMPT",
     "ABSTRACT_PROMPT",
+    # 评测judge
+    "JUDGE_PROMPT",
 ]

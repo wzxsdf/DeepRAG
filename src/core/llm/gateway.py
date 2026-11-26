@@ -34,7 +34,8 @@ class ModelGateway:
         s = self._s
         field = {"generate": s.chat_generate_model,
                  "fast": s.chat_fast_model,
-                 "reason": s.chat_reason_model}.get(purpose, s.chat_fast_model)
+                 "reason": s.chat_reason_model,
+                 "judge": s.chat_judge_model}.get(purpose, s.chat_fast_model)
         return field or f"openai:{s.litellm_model}"
 
     def chat_model(self, purpose: str = "fast") -> BaseChatModel:

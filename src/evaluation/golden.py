@@ -1,10 +1,14 @@
-# ponytail: 评估文档集(确定性id) + Golden问题(标注relevant doc ids)
-# golden v2(20261125定版): 24主题文档 + 24语义近似干扰项, 54问(v1的10问原样保留 + 新增44问)
+# ponytail: 评估文档集(确定性id) + Golden问题(标注relevant doc ids + 参考答案) + 不可答负样本
+# golden v3(20261126定版): v2的54问原样保留并补"answer"参考答案 + 新增8问关键词型 + UNANSWERABLE 10问
 # 设计规则:
 #   1. 每个主题文档是自包含短段落, 关键事实落在前150字符内(kb模式证据截断窗口)
 #   2. 干扰项与主题语义近似但不作为任何问题的relevant, 考验 dense 被噪声误导、hybrid/rerank 纠偏
-#   3. v1语料16文档时 top_k=20 能捞回全库, 候选R@20被饱和成1.0(假信号); v2扩到48文档后 top20≈42%池子, headroom读数才有意义
-#   4. 问题刻意口语化/同义/泛指, 避开原文关键词; relevant 只允许主题文档, 每问1~3个
+#   3. v1语料16文档时 top_k=20 能捞回全库, 候选R@20被饱和成1.0(假信号); v2扩到48文档后 top20≈42%池子
+#   4. v2的54问刻意口语化/同义/泛指, 避开原文关键词; v3新增8问反向补齐——含ASCII精确token(RRF/IDF/
+#      InnoDB/BGE-M3等), 这是BM25稀疏路理论上应发挥的查询类型(v2只有改写型查询, hybrid增益无数据的根因)
+#   5. v3全部GOLDEN问带answer参考答案: 独立judge(异模型)据此评answer_correct, 替代verifier自评(1.000无信息量)
+#   6. UNANSWERABLE 10问: 语料完全不含答案(可含干扰项检索噪声), 期望行为=grade判无关→降级兜底
+#      (citations为空+source!=kb_grounded), 评"诚实降级率"——v2无负样本, 拒答路径从未被测过
 
 DOCUMENTS = [
     # --- 主题文档(被golden引用) ---
@@ -67,65 +71,93 @@ DISTRACTOR_IDS = frozenset({
     "doc_suzhou", "doc_tesla", "doc_andromeda", "doc_koala", "doc_potala",
 })
 
-GOLDEN_VERSION = "v2"
+# 主题文档id集合(UNANSWERABLE完整性校验/judge口径用)
+TOPIC_IDS = frozenset(doc_id for doc_id, _ in DOCUMENTS if doc_id not in DISTRACTOR_IDS)
+
+GOLDEN_VERSION = "v3"
 
 GOLDEN = [
     # --- v1的10问原样保留(基线可对比) ---
-    # ponytail: 问题刻意口语化/同义/泛指, 避开原文关键词, 考验dense能否被语义近似干扰项带偏
-    {"q": "DeepRAG用什么框架构建状态机?", "relevant": ["doc_arch"]},
-    {"q": "DeepRAG如何对检索结果做精排?", "relevant": ["doc_retrieval"]},          # crossencoder干扰
-    {"q": "这个系统怎么度量检索和生成的好坏?", "relevant": ["doc_eval"]},            # 口语指代
-    {"q": "哪个向量库支持原生稀疏和RRF融合?", "relevant": ["doc_vecdb"]},            # faiss/pinecone干扰
-    {"q": "那个输出1024维的多语言嵌入模型是什么?", "relevant": ["doc_embedding"]},   # gpt干扰
-    {"q": "检索增强生成为什么能降低幻觉?", "relevant": ["doc_rag"]},                 # gpt干扰
-    {"q": "两路召回的结果是怎么合并的?", "relevant": ["doc_retrieval", "doc_vecdb"]},
-    {"q": "存向量的系统和编码向量的模型怎么协作?", "relevant": ["doc_vecdb", "doc_embedding"]},
-    {"q": "法国首都的著名地标有哪些?", "relevant": ["doc_paris"]},                  # london强干扰
-    {"q": "DeepRAG怎样避免模型胡说八道?", "relevant": ["doc_arch", "doc_rag"]},     # 口语化
+    # ponytail: v2的54问刻意口语化/同义/泛指, 避开原文关键词, 考验dense能否被语义近似干扰项带偏
+    {"q": "DeepRAG用什么框架构建状态机?", "relevant": ["doc_arch"], "answer": "LangGraph"},
+    {"q": "DeepRAG如何对检索结果做精排?", "relevant": ["doc_retrieval"], "answer": "用BGE-Reranker交叉编码器精排"},          # crossencoder干扰
+    {"q": "这个系统怎么度量检索和生成的好坏?", "relevant": ["doc_eval"], "answer": "用Golden Dataset做消融实验,指标含Recall@K、MRR、Faithfulness、Citation Accuracy"},
+    {"q": "哪个向量库支持原生稀疏和RRF融合?", "relevant": ["doc_vecdb"], "answer": "Qdrant"},            # faiss/pinecone干扰
+    {"q": "那个输出1024维的多语言嵌入模型是什么?", "relevant": ["doc_embedding"], "answer": "BGE-M3"},   # gpt干扰
+    {"q": "检索增强生成为什么能降低幻觉?", "relevant": ["doc_rag"], "answer": "因为通过检索外部知识库为模型提供事实依据,减少凭参数知识作答的幻觉"},
+    {"q": "两路召回的结果是怎么合并的?", "relevant": ["doc_retrieval", "doc_vecdb"], "answer": "通过RRF融合"},
+    {"q": "存向量的系统和编码向量的模型怎么协作?", "relevant": ["doc_vecdb", "doc_embedding"], "answer": "BGE-M3编码dense向量,Qdrant负责存储并检索这些向量"},
+    {"q": "法国首都的著名地标有哪些?", "relevant": ["doc_paris"], "answer": "埃菲尔铁塔、卢浮宫和凯旋门"},                  # london强干扰
+    {"q": "DeepRAG怎样避免模型胡说八道?", "relevant": ["doc_arch", "doc_rag"], "answer": "检索外部知识库支撑回答(RAG),再经CRAG状态机做检索-评估-生成-校验自纠"},     # 口语化
     # --- v2新增(覆盖全部24主题, 每主题至少2问; 多relevant跨簇联动问在末尾) ---
-    {"q": "DeepRAG里那个检索-评估-再检索的自纠循环在哪个模块实现?", "relevant": ["doc_arch"]},
-    {"q": "这个项目稀疏检索的词项权重是数据库侧算的吗?", "relevant": ["doc_vecdb", "doc_retrieval"]},  # splade干扰: 学习型稀疏在模型侧
-    {"q": "想知道生成的答案是不是都基于检索到的原文,该看哪个指标?", "relevant": ["doc_eval"]},
-    {"q": "引用来源对不对得上该怎么评估?", "relevant": ["doc_eval"]},
-    {"q": "外部知识接进来模型就不容易瞎编了,这思路叫什么?", "relevant": ["doc_rag"]},
-    {"q": "哪个内存数据库既能当缓存又能做排行榜?", "relevant": ["doc_redis"]},       # memcached干扰
-    {"q": "想存哈希、列表这些复杂结构做缓存,选那个只支持字符串的还是支持多结构的?", "relevant": ["doc_redis"]},
-    {"q": "Python后端的异步后台任务用什么组件跑?", "relevant": ["doc_celery"]},      # kafka干扰
-    {"q": "失败任务自动重试和定时调度是谁负责的?", "relevant": ["doc_celery"]},      # kafka明说不管重试
-    {"q": "订单库存这种要事务和行级锁的数据放哪类数据库?", "relevant": ["doc_mysql"]},  # mongodb干扰
-    {"q": "强一致的表结构和灵活的文档存储之间,关系型那条路线用哪个?", "relevant": ["doc_mysql"]},
-    {"q": "用户上传的图片和PDF原文件落在哪个云服务?", "relevant": ["doc_oss"]},      # s3干扰
-    {"q": "哪个对象存储能给前端签发临时的下载链接?", "relevant": ["doc_oss"]},
-    {"q": "排查一次问答全链路调用用什么观测平台?", "relevant": ["doc_langfuse"]},    # langsmith干扰
-    {"q": "能自托管部署、还管prompt版本的LLM观测工具是哪个?", "relevant": ["doc_langfuse"]},
-    {"q": "涩谷那个全世界最忙的十字路口在哪个首都?", "relevant": ["doc_tokyo"]},     # seoul干扰
-    {"q": "日本首都看见的那座标志性铁塔叫什么?", "relevant": ["doc_tokyo"]},
-    {"q": "醋饭顶着生鱼片的那道日本料理是什么?", "relevant": ["doc_sushi"]},         # ramen干扰
-    {"q": "金枪鱼和玉子烧是哪道料理江户前流派的代表食材?", "relevant": ["doc_sushi"]},
-    {"q": "把应用连同依赖打包成镜像隔离跑起来的技术叫什么?", "relevant": ["doc_docker"]},  # k8s干扰
-    {"q": "镜像的分层文件系统是哪个技术带来的?", "relevant": ["doc_docker"]},
-    {"q": "写接口自动出OpenAPI文档的Python Web框架选谁?", "relevant": ["doc_fastapi"]},  # flask干扰
-    {"q": "想要原生async的现代Web框架,不选默认同步的那个老框架,该用谁?", "relevant": ["doc_fastapi"]},
-    {"q": "机器可解析的键值对结构化日志用哪个库?", "relevant": ["doc_structlog"]},   # std logging干扰
-    {"q": "中文分词在项目里用的什么库?", "relevant": ["doc_jieba"]},                 # pkuseg干扰
-    {"q": "支持自定义词典、动态规划切分的分词器是哪个?", "relevant": ["doc_jieba"]},
-    {"q": "西湖十景在哪座城市?", "relevant": ["doc_hangzhou"]},                     # suzhou园林干扰
-    {"q": "京杭大运河流经的哪座城市以一片湖闻名?", "relevant": ["doc_hangzhou"]},
-    {"q": "主打换电站补能的中国车企是哪家?", "relevant": ["doc_nio"]},               # tesla超充干扰
-    {"q": "ET5和ES6是哪个牌子的车?", "relevant": ["doc_nio"]},
-    {"q": "太阳系呆在哪个星系里?", "relevant": ["doc_milkyway"]},                   # andromeda干扰
-    {"q": "直径十万光年、装着上千亿颗恒星的棒旋星系是?", "relevant": ["doc_milkyway"]},
-    {"q": "吃竹子的中国国宝是谁?", "relevant": ["doc_panda"]},                      # koala干扰
-    {"q": "大熊猫主要蹲在哪些省的高山竹林里?", "relevant": ["doc_panda"]},
-    {"q": "紫禁城住过哪两个朝代的皇帝?", "relevant": ["doc_forbidden_city"]},        # potala宫殿干扰
-    {"q": "现存规模最大的古代宫殿建筑群是哪座?", "relevant": ["doc_forbidden_city"]},
+    {"q": "DeepRAG里那个检索-评估-再检索的自纠循环在哪个模块实现?", "relevant": ["doc_arch"], "answer": "LangGraph构建的Agent状态机(CRAG纠正式检索)"},
+    {"q": "这个项目稀疏检索的词项权重是数据库侧算的吗?", "relevant": ["doc_vecdb", "doc_retrieval"], "answer": "是,Qdrant原生BM25稀疏向量并在库侧做IDF加权"},  # splade干扰: 学习型稀疏在模型侧
+    {"q": "想知道生成的答案是不是都基于检索到的原文,该看哪个指标?", "relevant": ["doc_eval"], "answer": "Faithfulness"},
+    {"q": "引用来源对不对得上该怎么评估?", "relevant": ["doc_eval"], "answer": "Citation Accuracy"},
+    {"q": "外部知识接进来模型就不容易瞎编了,这思路叫什么?", "relevant": ["doc_rag"], "answer": "RAG(检索增强生成)"},
+    {"q": "哪个内存数据库既能当缓存又能做排行榜?", "relevant": ["doc_redis"], "answer": "Redis"},       # memcached干扰
+    {"q": "想存哈希、列表这些复杂结构做缓存,选那个只支持字符串的还是支持多结构的?", "relevant": ["doc_redis"], "answer": "选支持多结构的Redis(字符串、哈希、列表、集合等)"},
+    {"q": "Python后端的异步后台任务用什么组件跑?", "relevant": ["doc_celery"], "answer": "Celery"},      # kafka干扰
+    {"q": "失败任务自动重试和定时调度是谁负责的?", "relevant": ["doc_celery"], "answer": "Celery"},      # kafka明说不管重试
+    {"q": "订单库存这种要事务和行级锁的数据放哪类数据库?", "relevant": ["doc_mysql"], "answer": "MySQL(InnoDB引擎)"},  # mongodb干扰
+    {"q": "强一致的表结构和灵活的文档存储之间,关系型那条路线用哪个?", "relevant": ["doc_mysql"], "answer": "MySQL"},
+    {"q": "用户上传的图片和PDF原文件落在哪个云服务?", "relevant": ["doc_oss"], "answer": "阿里云OSS"},      # s3干扰
+    {"q": "哪个对象存储能给前端签发临时的下载链接?", "relevant": ["doc_oss"], "answer": "阿里云OSS(签名URL)"},
+    {"q": "排查一次问答全链路调用用什么观测平台?", "relevant": ["doc_langfuse"], "answer": "Langfuse"},    # langsmith干扰
+    {"q": "能自托管部署、还管prompt版本的LLM观测工具是哪个?", "relevant": ["doc_langfuse"], "answer": "Langfuse"},
+    {"q": "涩谷那个全世界最忙的十字路口在哪个首都?", "relevant": ["doc_tokyo"], "answer": "东京"},     # seoul干扰
+    {"q": "日本首都看见的那座标志性铁塔叫什么?", "relevant": ["doc_tokyo"], "answer": "东京塔"},
+    {"q": "醋饭顶着生鱼片的那道日本料理是什么?", "relevant": ["doc_sushi"], "answer": "寿司"},         # ramen干扰
+    {"q": "金枪鱼和玉子烧是哪道料理江户前流派的代表食材?", "relevant": ["doc_sushi"], "answer": "寿司(江户前寿司)"},
+    {"q": "把应用连同依赖打包成镜像隔离跑起来的技术叫什么?", "relevant": ["doc_docker"], "answer": "Docker"},  # k8s干扰
+    {"q": "镜像的分层文件系统是哪个技术带来的?", "relevant": ["doc_docker"], "answer": "Docker"},
+    {"q": "写接口自动出OpenAPI文档的Python Web框架选谁?", "relevant": ["doc_fastapi"], "answer": "FastAPI"},  # flask干扰
+    {"q": "想要原生async的现代Web框架,不选默认同步的那个老框架,该用谁?", "relevant": ["doc_fastapi"], "answer": "FastAPI"},
+    {"q": "机器可解析的键值对结构化日志用哪个库?", "relevant": ["doc_structlog"], "answer": "structlog"},   # std logging干扰
+    {"q": "中文分词在项目里用的什么库?", "relevant": ["doc_jieba"], "answer": "jieba"},                 # pkuseg干扰
+    {"q": "支持自定义词典、动态规划切分的分词器是哪个?", "relevant": ["doc_jieba"], "answer": "jieba"},
+    {"q": "西湖十景在哪座城市?", "relevant": ["doc_hangzhou"], "answer": "杭州"},                     # suzhou园林干扰
+    {"q": "京杭大运河流经的哪座城市以一片湖闻名?", "relevant": ["doc_hangzhou"], "answer": "杭州(西湖)"},
+    {"q": "主打换电站补能的中国车企是哪家?", "relevant": ["doc_nio"], "answer": "蔚来"},               # tesla超充干扰
+    {"q": "ET5和ES6是哪个牌子的车?", "relevant": ["doc_nio"], "answer": "蔚来"},
+    {"q": "太阳系呆在哪个星系里?", "relevant": ["doc_milkyway"], "answer": "银河系"},                   # andromeda干扰
+    {"q": "直径十万光年、装着上千亿颗恒星的棒旋星系是?", "relevant": ["doc_milkyway"], "answer": "银河系"},
+    {"q": "吃竹子的中国国宝是谁?", "relevant": ["doc_panda"], "answer": "大熊猫"},                      # koala干扰
+    {"q": "大熊猫主要蹲在哪些省的高山竹林里?", "relevant": ["doc_panda"], "answer": "四川、陕西和甘肃"},
+    {"q": "紫禁城住过哪两个朝代的皇帝?", "relevant": ["doc_forbidden_city"], "answer": "明清两代"},        # potala宫殿干扰
+    {"q": "现存规模最大的古代宫殿建筑群是哪座?", "relevant": ["doc_forbidden_city"], "answer": "故宫(紫禁城)"},
     # --- v2跨簇联动问(多relevant) ---
-    {"q": "缓存热点数据的内存库和扛异步任务的队列,项目里分别用的什么?", "relevant": ["doc_redis", "doc_celery"]},
-    {"q": "文件解析完的结构化数据进哪个数据库?分词又靠哪个库?", "relevant": ["doc_mysql", "doc_jieba"]},
-    {"q": "Web框架、任务队列、缓存三件套分别是什么?", "relevant": ["doc_fastapi", "doc_celery", "doc_redis"]},
-    {"q": "LLM调用链观测平台和结构化日志库分别是哪两个?", "relevant": ["doc_langfuse", "doc_structlog"]},
-    {"q": "日本和法国的首都各自最著名的地标是什么?", "relevant": ["doc_tokyo", "doc_paris"]},
-    {"q": "向量存储、Web框架、观测平台的项目选型分别是?", "relevant": ["doc_vecdb", "doc_fastapi", "doc_langfuse"]},
-    {"q": "意面配什么酱、寿司饭用什么调的味?", "relevant": ["doc_pasta", "doc_sushi"]},
-    {"q": "哪道西餐主食的经典吃法是配番茄罗勒酱?", "relevant": ["doc_pasta"]},   # pizza番茄酱干扰
+    {"q": "缓存热点数据的内存库和扛异步任务的队列,项目里分别用的什么?", "relevant": ["doc_redis", "doc_celery"], "answer": "Redis与Celery"},
+    {"q": "文件解析完的结构化数据进哪个数据库?分词又靠哪个库?", "relevant": ["doc_mysql", "doc_jieba"], "answer": "MySQL;jieba"},
+    {"q": "Web框架、任务队列、缓存三件套分别是什么?", "relevant": ["doc_fastapi", "doc_celery", "doc_redis"], "answer": "FastAPI、Celery、Redis"},
+    {"q": "LLM调用链观测平台和结构化日志库分别是哪两个?", "relevant": ["doc_langfuse", "doc_structlog"], "answer": "Langfuse;structlog"},
+    {"q": "日本和法国的首都各自最著名的地标是什么?", "relevant": ["doc_tokyo", "doc_paris"], "answer": "东京(涩谷路口/东京塔);巴黎(埃菲尔铁塔等)"},
+    {"q": "向量存储、Web框架、观测平台的项目选型分别是?", "relevant": ["doc_vecdb", "doc_fastapi", "doc_langfuse"], "answer": "Qdrant;FastAPI;Langfuse"},
+    {"q": "意面配什么酱、寿司饭用什么调的味?", "relevant": ["doc_pasta", "doc_sushi"], "answer": "番茄罗勒酱;醋(醋饭)"},
+    {"q": "哪道西餐主食的经典吃法是配番茄罗勒酱?", "relevant": ["doc_pasta"], "answer": "意大利面"},   # pizza番茄酱干扰
+    # --- v3新增: 关键词型查询(含ASCII精确token, BM25稀疏路理论上应发挥的查询类型) ---
+    {"q": "BGE-M3输出的dense向量是多少维?", "relevant": ["doc_embedding"], "answer": "1024维"},
+    {"q": "Qdrant对稀疏向量做哪种统计加权?", "relevant": ["doc_vecdb"], "answer": "IDF加权"},
+    {"q": "Redis原生支持哪些数据结构?(至少说出三种)", "relevant": ["doc_redis"], "answer": "字符串、哈希、列表、集合等"},
+    {"q": "Celery可以用哪两种消息代理当broker?", "relevant": ["doc_celery"], "answer": "Redis或RabbitMQ"},
+    {"q": "MySQL靠哪个存储引擎支持事务与行级锁?", "relevant": ["doc_mysql"], "answer": "InnoDB"},
+    {"q": "阿里云OSS给前端做临时下载的机制叫什么?", "relevant": ["doc_oss"], "answer": "签名URL"},
+    {"q": "structlog输出的日志是什么形态?", "relevant": ["doc_structlog"], "answer": "键值对(机器可解析)"},
+    {"q": "BGE-Reranker属于哪类精排模型架构?", "relevant": ["doc_retrieval"], "answer": "交叉编码器(Cross-Encoder)"},  # crossencoder干扰项同域考验区分
+]
+
+# v3新增: 不可答负样本(语料完全不含答案; 部分含干扰项检索噪声如tesla/gpt/k8s)
+# 期望行为: grade判全部无关 → 降级tool_agent兜底 → citations为空 且 source != kb_grounded(诚实降级)
+# 评"诚实降级率"(objective): fabrication = 编造了kb_grounded引用或citation指向语料
+UNANSWERABLE = [
+    "DeepRAG的作者是谁?",
+    "公司年假有几天?",
+    "DeepRAG提供Go语言的SDK吗?",
+    "特斯拉Model Y的续航是多少公里?",
+    "怎么申请GitHub组织的管理员权限?",
+    "OpenAI的API定价是每token多少钱?",
+    "公司食堂中午一般有什么菜?",
+    "pgvector和Qdrant相比哪个更适合生产?",
+    "DeepRAG当前的最新版本号是多少?",
+    "Kubernetes的Node亲和性规则怎么配置?",
 ]

@@ -16,8 +16,9 @@ if sys.platform == "win32":
 
 load_dotenv()
 
-from src.evaluation.ablation import create_eval_writer, delete_eval_collection, eval_crag, eval_retrieval, ingest_eval_set
-from src.evaluation.golden import DISTRACTOR_IDS, DOCUMENTS, GOLDEN, GOLDEN_VERSION
+from src.evaluation.ablation import (create_eval_writer, delete_eval_collection, eval_crag,
+                                     eval_crag_unanswerable, eval_retrieval, ingest_eval_set)
+from src.evaluation.golden import DISTRACTOR_IDS, DOCUMENTS, GOLDEN, GOLDEN_VERSION, UNANSWERABLE
 
 CONFIGS = [
     ("dense", "dense-only"),
@@ -26,7 +27,8 @@ CONFIGS = [
     ("funnel_top20_rerank5", "funnel top20->rerank5"),
 ]
 COLS = ["candidate_recall@5", "candidate_recall@20", "recall@1", "recall@5", "mrr@5", "ndcg@5",
-        "faithfulness", "citation_acc", "p50_ms", "p95_ms", "rerank_fallbacks", "retries_total", "retried_n"]
+        "faithfulness", "citation_acc", "judge_answer", "judge_grounded", "judge_citation",
+        "p50_ms", "p95_ms", "rerank_fallbacks", "retries_total", "retried_n", "judge_n"]
 N_TOPICS = len(DOCUMENTS) - len(DISTRACTOR_IDS)
 
 
@@ -64,6 +66,7 @@ async def main(only: str = "all"):
                       f"p50={_ms(m['p50_ms'])}ms p95={_ms(m['p95_ms'])}ms fallback={m.get('rerank_fallbacks', '-')}")
 
         if only in ("all", "crag"):
+            crag, una = {}, None
             print("\n  +CRAG(agent工具检索, 含生成指标, 调LLM较慢)...")
             crag = await eval_crag(writer)
             rows.append({"config": "+CRAG", **crag, "candidate_recall@5": None, "candidate_recall@20": None,
@@ -72,13 +75,24 @@ async def main(only: str = "all"):
                   f"MRR@5={crag['mrr@5']:.3f} nDCG@5={crag['ndcg@5']:.3f} Faith={crag['faithfulness']:.3f} "
                   f"Cite={crag['citation_acc']:.3f} p50={_ms(crag['p50_ms'])}ms p95={_ms(crag['p95_ms'])}ms "
                   f"retried={crag['retried_n']}/{crag['n']}(共{crag['retries_total']}次) (n={crag['n']})")
+            if crag.get("judge_n"):
+                print(f"    judge(独立异模型): answer_correct={crag['judge_answer']:.3f} "
+                      f"grounded={crag['judge_grounded']:.3f} citation={crag['judge_citation']:.3f} "
+                      f"(n={crag['judge_n']})")
+            else:
+                print("    judge: 未产出(CHAT_JUDGE_MODEL未配置或调用全败, Faith/Cite为verifier自评口径)")
+
+            print(f"\n  不可答负样本({len(UNANSWERABLE)}问, 诚实降级率)...")
+            una = await eval_crag_unanswerable(writer)
+            print(f"    诚实降级率={una['honest_rate']:.3f}({una['honest_n']}/{una['n']}) "
+                  f"sources={una['sources']} p50={_ms(una['p50_ms'])}ms p95={_ms(una['p95_ms'])}ms")
 
         trials_dir = os.path.join("docs", "trials")
         os.makedirs(trials_dir, exist_ok=True)
         csv_path = os.path.join(trials_dir, f"{trial_id}_w2_ablation.csv")
         md_path = os.path.join(trials_dir, f"{trial_id}_w2_ablation.md")
         _write_csv(rows, csv_path)
-        _write_md(rows, trial_id, md_path)
+        _write_md(rows, trial_id, md_path, una=una)
         print(f"\n✓ 已存 {csv_path} + {md_path}")
     finally:
         delete_eval_collection(writer)
@@ -100,7 +114,7 @@ def _delta(a, b):
     return None
 
 
-def _write_md(rows, trial_id, path):
+def _write_md(rows, trial_id, path, una=None):
     """Markdown报告, 结论由本次数据动态计算(不再硬编码历史数字)."""
     by = {r["config"]: r for r in rows}
     dense, hybrid = by.get("dense-only", {}), by.get("+hybrid(RRF)", {})
@@ -153,6 +167,13 @@ def _write_md(rows, trial_id, path):
         lines.append(f"- CRAG Agent: R@5={_f(crag.get('recall@5'))} Faith={_f(crag.get('faithfulness'))} "
                      f"Cite={_f(crag.get('citation_acc'))} p50={_ms(crag.get('p50_ms'))}ms(含LLM生成延迟); "
                      f"重试 {crag.get('retries_total', 0)} 次 / {crag.get('retried_n', 0)} 问触发重试。")
+        if crag.get("judge_n"):
+            lines.append(f"- **独立judge(P1②, 异模型对照参考答案)**: answer_correct={_f(crag.get('judge_answer'))} "
+                         f"grounded={_f(crag.get('judge_grounded'))} citation_correct={_f(crag.get('judge_citation'))} "
+                         f"(n={crag.get('judge_n')}); 此口径替代verifier自评(Faith★/Cite★自评1.000无区分度)。")
+        else:
+            lines.append("- 独立judge未产出(CHAT_JUDGE_MODEL未配置或调用全败): Faith★/Cite★为verifier自评口径, "
+                         "1.000无区分度, 不作为对外质量数字。")
         tail = crag.get("tail") or []
         if tail:
             lines += ["", "### p95长尾归因(lat≥p95的问题, 按延迟降序)", "",
@@ -166,8 +187,23 @@ def _write_md(rows, trial_id, path):
             lines += ["", f"长尾{len(tail)}问中 {retried_share:.0%} 触发agent重试; "
                           f"重试占比高则长尾为重试共性问题(考虑收紧verifier阈值/检索置信度短路), "
                           f"低则为个例波动。"]
-    v2_note = (f"golden {GOLDEN_VERSION} 定版口径({len(GOLDEN)}问×{len(DOCUMENTS)}文档); 单次运行仍受随机噪声影响, "
-               "对外引用前建议多轮运行取均值, 并按同口径保留trial记录以追踪基线漂移。") if GOLDEN_VERSION == "v2" else \
+    if una:
+        honest_rate = una.get("honest_rate")
+        lines += ["", "### 不可答负样本(诚实降级, P1②)", "",
+                  f"诚实降级率 **{_f(honest_rate)}**({una.get('honest_n')}/{una.get('n')}) — "
+                  "期望: grade判全部无关→降级tool_agent(citations为空且source≠kb_grounded); "
+                  "编造kb_grounded引用即计不诚实。", "",
+                  "| 问题 | 延迟(ms) | source | citations | 诚实 |",
+                  "|---|---|---|---|---|"]
+        for r in una.get("per_question", []):
+            q = r["q"] if len(r["q"]) <= 24 else r["q"][:24] + "…"
+            lines.append(f"| {q} | {r['lat_ms']:.0f} | {r['source']} | {r['citations']} "
+                         f"| {'✓' if r['honest'] else '✗'} |")
+        src_hist = una.get("sources") or {}
+        lines += ["", f"source分布: {src_hist}"]
+    v2_note = (f"golden {GOLDEN_VERSION} 定版口径({len(GOLDEN)}问×{len(DOCUMENTS)}文档+{len(UNANSWERABLE)}不可答); "
+               "单次运行仍受随机噪声影响, "
+               "对外引用前建议多轮运行取均值, 并按同口径保留trial记录以追踪基线漂移。") if GOLDEN_VERSION >= "v2" else \
         (f"当前 golden 仅 {len(GOLDEN)} 问(smoke baseline), 单次运行, 指标差异在噪声范围内, "
          "不作为简历/对外数字; golden v2(≥50条)定版后按同口径重跑替换本报告。")
     lines += ["", f"**样本量口径**: {v2_note}"]

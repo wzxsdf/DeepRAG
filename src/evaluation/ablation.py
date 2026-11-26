@@ -9,7 +9,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from src.agents.graph import build_graph
-from src.evaluation.golden import DOCUMENTS, GOLDEN
+from src.core.logging import log
+from src.evaluation.golden import DOCUMENTS, GOLDEN, UNANSWERABLE
 from src.retrieval.embedder import embed_query
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.reranker import deduplicate_documents, rerank
@@ -163,13 +164,34 @@ async def eval_retrieval(config: str, writer: QdrantWriter) -> dict[str, float |
     }
 
 
+async def _judge_answer(question: str, answer: str, docs: list, reference: str) -> dict | None:
+    """P1② 独立judge: 异模型(purpose=judge→CHAT_JUDGE_MODEL)对照参考答案评分, 替代verifier自评(1.000无信息量).
+    失败/解析错返回None(计skip, 不进judge均值). CHAT_JUDGE_MODEL空时purpose回退fast=自评口径, 报告应标注."""
+    try:
+        from src.core.llm import chat_json
+        from src.prompts import JUDGE_PROMPT
+        evidence = "\n\n".join(f"[{i+1}] {d.content}" for i, d in enumerate(docs))
+        res = await chat_json([{"role": "user", "content": JUDGE_PROMPT.format(
+            question=question, reference=reference, answer=answer, evidence=evidence)}],
+            purpose="judge")
+        if not isinstance(res, dict) or "error" in res:
+            return None
+        return res
+    except Exception as e:
+        log.warning("judge_call_failed", q=question[:24], error=type(e).__name__, msg=str(e))
+        return None
+
+
 async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str, Any]:
-    """Run CRAG with the isolated collection; per-question retries captured for p95 tail attribution."""
+    """Run CRAG with the isolated collection; per-question retries captured for p95 tail attribution.
+    P1②: 带参考答案的问题额外走独立judge(异模型)评answer_correct/grounded/citation."""
     golden = GOLDEN[:subset] if subset else GOLDEN
     retriever = HybridRetriever(qdrant=writer, resolve_active_versions=False)
     graph = build_graph(retriever)
     agg = {"recall@1": 0.0, "recall@5": 0.0, "mrr@5": 0.0, "ndcg@5": 0.0}
     faith = cite = 0.0
+    judge_answer = judge_grounded = judge_citation = 0.0
+    judge_n = 0
     lats: list[float] = []
     per_question: list[dict[str, Any]] = []
     for item in golden:
@@ -191,6 +213,16 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str
         verification = values.get("verification") or {}
         faith += float(bool(verification.get("grounded")))
         cite += float(bool(verification.get("citations_valid")))
+        # P1②: 独立judge对照参考答案评分(带answer字段的问题才评)
+        ref = item.get("answer")
+        if ref:
+            j = await _judge_answer(item["q"], values.get("generation", ""),
+                                    values.get("documents", []), ref)
+            if j is not None:
+                judge_n += 1
+                judge_answer += float(bool(j.get("answer_correct")))
+                judge_grounded += float(bool(j.get("grounded")))
+                judge_citation += float(bool(j.get("citation_correct")))
         retries = int(values.get("retry_count") or 0)
         per_question.append({"q": item["q"], "lat_ms": lat_ms, "retries": retries,
                              "recall@5": metrics["recall@5"],
@@ -203,10 +235,51 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None) -> dict[str
     return {key: value / n for key, value in agg.items()} | {
         "faithfulness": faith / n,
         "citation_acc": cite / n,
+        "judge_answer": judge_answer / judge_n if judge_n else None,
+        "judge_grounded": judge_grounded / judge_n if judge_n else None,
+        "judge_citation": judge_citation / judge_n if judge_n else None,
+        "judge_n": judge_n,
         "p50_ms": _pct(sorted(lats), 50),
         "p95_ms": p95,
         "retries_total": sum(r["retries"] for r in per_question),
         "retried_n": retried_n,
         "tail": tail,
         "n": n,
+    }
+
+
+async def eval_crag_unanswerable(writer: QdrantWriter) -> dict[str, Any]:
+    """P1② 不可答负样本(UNANSWERABLE, 语料无答案): 期望 grade 判全部无关→降级 tool_agent 兜底.
+    诚实降级(objective): citations为空 且 source != kb_grounded — 编造kb_grounded引用即计不诚实."""
+    retriever = HybridRetriever(qdrant=writer, resolve_active_versions=False)
+    graph = build_graph(retriever)
+    lats: list[float] = []
+    per_q: list[dict[str, Any]] = []
+    for q in UNANSWERABLE:
+        cfg = {"configurable": {"thread_id": f"una-{uuid.uuid4().hex}"}}
+        started = time.perf_counter()
+        values = await graph.ainvoke(
+            {"question": q, "query": q, "tenant_id": "default", "retry_count": 0,
+             "documents": [], "search_decision": "", "generation": "", "verification": None,
+             "mode": "kb"}, config=cfg)
+        lat_ms = (time.perf_counter() - started) * 1000
+        lats.append(lat_ms)
+        docs = values.get("documents", [])
+        source = values.get("source", "")
+        honest = (len(docs) == 0 and source != "kb_grounded")
+        per_q.append({"q": q, "lat_ms": lat_ms, "source": source,
+                      "citations": len(docs), "honest": honest})
+    n = len(UNANSWERABLE)
+    honest_n = sum(1 for r in per_q if r["honest"])
+    sources: dict[str, int] = {}
+    for r in per_q:
+        sources[r["source"]] = sources.get(r["source"], 0) + 1
+    return {
+        "n": n,
+        "honest_rate": honest_n / n if n else None,
+        "honest_n": honest_n,
+        "sources": sources,
+        "p50_ms": _pct(sorted(lats), 50),
+        "p95_ms": _pct(sorted(lats), 95),
+        "per_question": per_q,
     }

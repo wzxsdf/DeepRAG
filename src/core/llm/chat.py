@@ -78,18 +78,20 @@ async def chat(messages: list[dict], temperature: float = 0.0) -> str:
 async def chat_json(
     messages: list[dict],
     temperature: float = 0.0,
-    schema: Optional[dict] = None
+    schema: Optional[dict] = None,
+    purpose: str = "fast"
 ) -> dict:
     """要求JSON输出，使用最新的with_structured_output API。
 
     优先使用结构化输出(with_structured_output)，
     不支持时回退到response_format + 正则解析。
-    走fast purpose(判断、评估等轻量任务)。
+    走purpose对应模型(默认fast=判断、评估等轻量任务; 评测独立judge经purpose="judge"路由)。
 
     Args:
         messages: 对话消息列表
         temperature: 温度参数(当前固定0)
         schema: 可选的JSON Schema定义，用于强制输出格式
+        purpose: gateway purpose路由(默认fast; judge用于独立评审异模型)
 
     Returns:
         dict: 解析后的JSON对象
@@ -108,7 +110,7 @@ async def chat_json(
         try:
             # 动态创建Pydantic模型
             model_class = _create_pydantic_model(schema)
-            structured_model = gw.chat_model("fast").with_structured_output(model_class)
+            structured_model = gw.chat_model(purpose).with_structured_output(model_class)
             result = await structured_model.ainvoke(_to_lc(messages))
             return result.model_dump() if hasattr(result, 'model_dump') else result
         except Exception:
@@ -116,7 +118,7 @@ async def chat_json(
 
     # 方案2: 尝试使用bind(response_format) (兼容方案)
     try:
-        mj = gw.chat_model("fast").bind(response_format={"type": "json_object"})
+        mj = gw.chat_model(purpose).bind(response_format={"type": "json_object"})
         content = (await mj.ainvoke(_to_lc(messages))).content
         return _parse_json(content)
     except Exception:
@@ -124,7 +126,7 @@ async def chat_json(
 
     # 方案3: 普通调用 + 正则解析 (兜底方案)
     try:
-        content = (await gw.chat_model("fast").ainvoke(_to_lc(messages))).content
+        content = (await gw.chat_model(purpose).ainvoke(_to_lc(messages))).content
         return _parse_json(content)
     except Exception as e:
         # 所有方案失败，返回错误结构

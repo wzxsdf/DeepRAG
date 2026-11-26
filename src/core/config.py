@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     chat_generate_model: str = ""   # CRAG生成(强); 配 "provider:model" 启用多模型路由
     chat_fast_model: str = ""       # grade/judge/rewrite(快省)
     chat_reason_model: str = ""     # plan规划(推理)
+    # ponytail: 评测独立judge模型(评审P1②) — 必须与generate/fast异模型才有独立效度; 空=judge关闭(评测回退自评口径)
+    chat_judge_model: str = ""
 
     # --- purpose级输出token封顶; 0=不封顶(旧行为) ---
     # ponytail: CRAG回答为短事实+引用, 长输出只在长尾出现, 封顶直接压p95(golden v2实测长尾generate单节点最长12.5s)
