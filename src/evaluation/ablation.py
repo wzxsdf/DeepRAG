@@ -239,6 +239,7 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None,
 
     retriever = HybridRetriever(qdrant=writer, resolve_active_versions=False)
     graph = build_graph(retriever)
+    suspect_n = 0  # 可疑签名: recall@1=0 + 无grounded + 0重试(=检索分数坏/端点退化窗口)
     for idx in pending:
         item = golden[idx]
         cfg = {"configurable": {"thread_id": f"crag-{uuid.uuid4().hex}"}}
@@ -255,6 +256,21 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None,
                            set(item["relevant"]))
         verification = values.get("verification") or {}
         retries = int(values.get("retry_count") or 0)
+        done_in_run = idx - pending[0] + 1
+        if metrics["recall@1"] == 0.0 and not verification.get("grounded") and retries == 0:
+            suspect_n += 1
+            # 坏窗口熔断(20261127凌晨实测: SiliconFlow夜间退化窗口, 12/13问全零分, 重试无法自愈):
+            # 已测≥8问且可疑率≥75% → 判定坏窗口, 立即中止(ckpt保留已完成问, 换窗口续跑)
+            if done_in_run >= 8 and suspect_n / done_in_run >= 0.75:
+                _ckpt_append(ckpt_path, {"idx": idx, "q": item["q"], "lat_ms": lat_ms,
+                                         "recall@1": metrics["recall@1"], "recall@5": metrics["recall@5"],
+                                         "mrr@5": metrics["mrr@5"], "ndcg@5": metrics["ndcg@5"],
+                                         "grounded": False, "citations_valid": False, "retries": retries,
+                                         "judge_answer": None, "judge_grounded": None,
+                                         "judge_citation": None, "suspect": True})
+                raise RuntimeError(
+                    f"eval_crag坏窗口熔断: 前{done_in_run}问中{suspect_n}问可疑(recall@1=0且无grounded且0重试), "
+                    "疑似LLM/rerank/embedding端点退化窗口; ckpt已保留已完成问题, 请换时间窗口续跑")
         rec: dict[str, Any] = {
             "idx": idx, "q": item["q"], "lat_ms": lat_ms,
             "recall@1": metrics["recall@1"], "recall@5": metrics["recall@5"],
