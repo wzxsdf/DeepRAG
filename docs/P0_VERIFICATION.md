@@ -23,6 +23,42 @@
 - **依赖修复(qdrant-client)**:1.12.1 → 1.19.1,`pyproject.toml` 下限提至 `>=1.14.0`。原因:`query_points` 对 `Qdrant/bm25` 的服务端推理透传需 client ≥1.14,1.12 误走本地 fastembed 报 `not among supported models`,导致 **hybrid(BM25 路)检索整体不可用**(P0 级问题);1.20 对 server 1.18.3 有 minor 差 2 的兼容警告,故固定 1.19。
 - **eval_crag 显式 `mode="kb"`**:缺省 mode=quick 会使 graph 进入 tool_agent(联网工具检索),与检索消融口径不可比;修复前 CRAG 行全 0(trial 20261125_002736,已删除该误导性产物)。
 
+### 评测效度补齐 P1②: golden v3 + 独立judge + 负样本(2026-11-26 第六轮)
+
+**golden v3**(62问×48文档 + UNANSWERABLE 10问, `src/evaluation/golden.py`): v2的54问原样保留并全部补 `answer` 参考答案; 新增8问关键词型(RRF/IDF/InnoDB/BGE-M3等ASCII精确token — BM25稀疏路理论主场, v2只有改写型查询是"hybrid增益无数据"的根因); 10问不可答负样本(语料无答案, 部分含tesla/gpt/k8s干扰检索噪声)。
+
+**独立judge**: `CHAT_JUDGE_MODEL=openai:zai-org/GLM-5.3-Flash`(与生成端DeepSeek-V4.1-Flash异族异构; Qwen3.5-9B实测27.9s/次过慢弃用), gateway新增judge purpose, `chat_json`支持purpose参数; 对照参考答案评answer_correct/grounded/citation_correct, 替代自评1.000的无区分度口径。
+
+**完整trial** `20261126_202308`([md](trials/20261126_202308_w2_ablation.md), 分块断点续跑完成; 漏斗数字与另两次独立运行逐位一致—确定性三连复现):
+
+| Config | R@1 | R@5 | MRR@5 | nDCG@5 | p50 | p95 | Faith★自评 | Judge答准★ | Judge支撑★ | Judge引用★ |
+|---|---|---|---|---|---|---|---|---|---|---|
+| dense-only | 0.839 | 0.938 | 0.887 | 0.895 | 1.0s | 1.2s | - | - | - | - |
+| +hybrid(RRF) | 0.823 | 0.938 | 0.879 | 0.888 | 1.1s | 1.3s | - | - | - | - |
+| top20→rerank5 | 0.903 | 0.944 | 0.937 | 0.926 | 2.2s | 2.4s | - | - | - | - |
+| +CRAG | 0.952 | 0.927 | 0.960 | 0.933 | 6.7s | 16.2s | 0.984 | **0.839** | 0.984 | 0.984 |
+
+**四大结论**:
+1. **独立judge撕开自评水分**: 真实答案正确率 **0.839**(对照参考答案, n=62) — 自评Faith/Cite 1.000时代结束; 事实支撑/引用经独立佐证0.984(质量底子真实, 但16%回答未完全命中参考答案)。
+2. **hybrid卖点证伪**: 整体口径 dense 0.839 > hybrid 0.823(R@1); **关键词8问子集 dense 满分1.000, hybrid R@1反降0.875** — BM25理论主场也输。本语料(短文档, 精确token即主题词)下dense足够, BM25路(0.35权重)只引入噪声。→ 待办: RRF权重重调实验, 或README叙事如实改写。
+3. **不可答负样本抓到幻觉路径**: 诚实降级率两轮合并 **17/20(0.85)**; `kb_grounded`编造引用3例(特斯拉Model Y/pgvector对比等被干扰项误导grade) — 无负样本时该路径永远测不出。→ 待办: grade拒答校准。
+4. **纠错循环首次真实触发且奏效**: 1/62(重试问最终R@5=1.000且grounded ✓, 长尾归因表可查) — 第五轮改造的enough_evidence分流在真实失败上验证。
+
+**工程教训(本轮排障全部为环境问题, 处置均已固化)**:
+
+| 问题 | 处置 |
+|---|---|
+| Qdrant代理502打在finally掩盖根因 | 清理改告警不抛 |
+| httpx读注册表系统代理(127.0.0.1:7890抖动) | 评测带`NO_PROXY=*`直连(三服务直连验证OK) |
+| 机器待机静默杀长跑 | `SetThreadExecutionState`防待机(run_w2_eval内建) |
+| DNS故障→断网(getaddrinfo failed/WinError 10051) | 后台探测循环等恢复 |
+| **后台长跑~21分钟被静默杀死(两次, 日志冻结无Traceback, 非上述任何原因)** | **分块+断点续跑架构**: eval_crag逐问记录checkpoint jsonl, `--resumable`/`--max-q`/`--merge-from`(漏斗CSV确定性复用), 62问分6块全部完成 |
+| judge选型27.9s/次(Qwen3.5-9B) | GLM-5.3-Flash 6-9s/次 |
+
+**基线重立**: `baseline.md` 重建为golden v3口径(参与trial: `20261126_202308`; v2历史trial按口径过滤排除, aggregate_baseline `--v2`可切回)。`pytest` 47 passed(+6例golden v3完整性)。
+
+**遗留待办(按优先级)**: ① RRF权重重调(0.65/0.35→扫参)或hybrid叙事改写; ② grade拒答校准(幻觉引用3/20); ③ 真实入库链路评测(分块/父块/截断全链路); ④ ReAct工具150字符截断上调; ⑤ P3方向(多租户/记忆A/B)待决策。
+
 ### CRAG 真纠错改造 + P2 减法(2026-11-26 第五轮)
 
 **① CRAG 循环改真纠错**(`src/agents/graph.py` + `src/prompts/crag.py`, 修复评审发现"循环不纠错"):
