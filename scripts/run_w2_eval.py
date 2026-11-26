@@ -55,17 +55,39 @@ def _keep_system_awake(enable: bool):
         ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if enable else 0))
 
 
-async def main(only: str = "all"):
-    """only: all(默认, 检索漏斗+CRAG全量) / retrieval(仅漏斗) / crag(仅CRAG, 用于生成侧改动验证提速)."""
+async def main(only: str = "all", resumable: bool = False, max_q: str | None = None,
+               merge_from: str | None = None):
+    """only: all(默认) / retrieval(仅漏斗) / crag(仅CRAG+不可答).
+    resumable: CRAG逐问checkpoint到临时文件, 配合--max-q分块续跑(后台长跑会被~20min静默杀死);
+    merge_from: 预载此前retrieval-only trial的CSV行(漏斗数字确定可复用, 免重跑5分钟)."""
+    import tempfile
     _keep_system_awake(True)
     trial_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     print("=" * 104)
     print(f"DeepRAG 消融+漏斗对照 trial={trial_id} (golden {GOLDEN_VERSION}: {len(GOLDEN)}问 × {len(DOCUMENTS)}文档"
-          f"{' · 仅CRAG' if only == 'crag' else ''})")
+          f"{' · 仅CRAG' if only == 'crag' else ''}{(' · 续跑ckpt') if resumable else ''})")
     print("=" * 104)
 
+    ckpt = os.path.join(tempfile.gettempdir(), "deeprag_eval_crag_ckpt.jsonl") if resumable else None
+    rows: list[dict] = []
+    if merge_from:  # 预载漏斗行(检索确定性, 数字与重跑逐位一致)
+        import csv as _csv
+        with open(merge_from, encoding="utf-8") as f:
+            for r in _csv.DictReader(f):
+                row: dict = {"config": r["config"]}
+                for c in COLS:
+                    v = (r.get(c) or "").strip()
+                    if v and v != "-":
+                        try:
+                            row[c] = float(v)
+                        except ValueError:
+                            pass
+                if r.get("n"):
+                    row["n"] = r["n"]
+                rows.append(row)
+        print(f"已从 {merge_from} 预载 {len(rows)} 行漏斗结果")
+
     writer = create_eval_writer()
-    rows = []
     try:
         n_docs = await ingest_eval_set(writer)
         print(f"评测集合 {writer.collection_name}: 入库 {n_docs} chunks\n")
@@ -81,7 +103,12 @@ async def main(only: str = "all"):
         if only in ("all", "crag"):
             crag, una = {}, None
             print("\n  +CRAG(agent工具检索, 含生成指标, 调LLM较慢)...")
-            crag = await eval_crag(writer)
+            crag = await eval_crag(writer, ckpt_path=ckpt,
+                                   max_questions=int(max_q) if max_q else None)
+            if crag.get("partial"):
+                print(f"[partial] CRAG断点进度 {crag['done_n']}/{crag['n']} "
+                      f"— 再次运行同一命令续跑(本块截止, 未产出报告)")
+                return
             rows.append({"config": "+CRAG", **crag, "candidate_recall@5": None, "candidate_recall@20": None,
                          "rerank_fallbacks": None})
             print(f"  {'+CRAG':<20} R@1={crag['recall@1']:.3f} R@5={crag['recall@5']:.3f} "
@@ -226,5 +253,9 @@ def _write_md(rows, trial_id, path, una=None):
 
 
 if __name__ == "__main__":
-    _only = "crag" if "--only" in sys.argv and "crag" in sys.argv else "all"
-    asyncio.run(main(_only))
+    def _arg(flag, default=None):
+        return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else default
+    asyncio.run(main(_arg("--only", "all"),
+                     resumable="--resumable" in sys.argv,
+                     max_q=_arg("--max-q"),
+                     merge_from=_arg("--merge-from")))
