@@ -118,10 +118,13 @@ class Settings(BaseSettings):
     memory_enable_summary: bool = True       # 是否启用LLM摘要; False=超预算时仅硬截断(纯窗口)
 
     # --- 长期记忆(P1, 即插即用) ---
-    memory_long_term_enabled: bool = True    # 长期记忆读闭环开关; False=不建agent_memory, _entry_node跳过检索
+    # 20261126封存决定: 长期记忆链路(P1/P2/P3)代码保留但默认关断 — 从未做过质量A/B(注入的记忆
+    # 可能增益也可能污染, 未验证答案也会沉淀), 且与DESIGN.md"长期记忆全砍"章程冲突; 检索/Agent优化
+    # 优先, 记忆量化验证与重开列入后续agent/记忆优化阶段。置true可整体重开。
+    memory_long_term_enabled: bool = False   # 长期记忆读闭环开关; False=不建agent_memory, _entry_node跳过检索
 
     # --- 实体记忆 + 写闭环(P2, 即插即用) ---
-    memory_auto_write: bool = True           # 写闭环开关; False=不沉淀记忆(query.py跳过writer)
+    memory_auto_write: bool = False          # 写闭环开关; False=不沉淀记忆(query.py跳过writer)
     memory_write_interval: int = 5           # A1 写队列worker轮询间隔秒; 0=不启动worker(仅入队不消费)
 
     # --- 记忆整合(P3, 即插即用) ---
