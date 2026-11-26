@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # 精确缓存不受影响照常生效。确认升级为向量相似度后再开启。
     cache_semantic_enabled: bool = False
 
+    # --- 检索拒答校准(20261126, P1②负样本实测) ---
+    # kb模式grade前阈值短路: rerank分数低于此值→直接判无证据降级(不过grader LLM)。
+    # 标定: golden 32问top1中位0.927 / 不可答10问中位0.012, 双峰分布0.03~0.8有空隙, 0.30取中点。
+    # 0=关闭短路(旧行为)。
+    retrieval_min_score: float = 0.30
+
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)
     memory_max_context_tokens: int = 2000    # 历史占用token预算; 超过才触发摘要+窗口

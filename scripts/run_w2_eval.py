@@ -68,7 +68,12 @@ async def main(only: str = "all", resumable: bool = False, max_q: str | None = N
           f"{' · 仅CRAG' if only == 'crag' else ''}{(' · 续跑ckpt') if resumable else ''})")
     print("=" * 104)
 
-    ckpt = os.path.join(tempfile.gettempdir(), "deeprag_eval_crag_ckpt.jsonl") if resumable else None
+    # --ckpt-name: 断点文件命名空间(不同代码版本的验证跑用不同名字, 避免混入旧结果)
+    ckpt = None
+    if resumable:
+        name = os.getenv("EVAL_CKPT_NAME", "")
+        suffix = f"_{name}" if name else ""
+        ckpt = os.path.join(tempfile.gettempdir(), f"deeprag_eval_crag{suffix}.jsonl")
     rows: list[dict] = []
     crag, una = {}, None  # ponytail: retrieval-only模式也要定义(修复UnboundLocalError@_write_md)
     if merge_from:  # 预载漏斗行(检索确定性, 数字与重跑逐位一致)

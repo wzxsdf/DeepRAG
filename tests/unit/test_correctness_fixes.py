@@ -65,6 +65,57 @@ def test_safety_allows_legit_security_topics(question):
 # ---------- 3. grade降级清空documents ----------
 
 @pytest.mark.asyncio
+async def test_grade_threshold_shortcircuit_skips_grader(monkeypatch):
+    """rerank分数低于阈值 → 直接降级且不调grader LLM(P1②拒答校准, 堵低分证据硬答的幻觉路径)."""
+    import src.agents.graph as G
+    import src.agents.react_agent as RA
+    import src.retrieval.reranker as RR
+    from src.storage.protocol import RetrievedDocument
+
+    class FakeRetriever:
+        async def retrieve(self, query, filters, top_k):
+            return [RetrievedDocument(chunk_id="c1", document_id="doc_noise", version_id="v1",
+                                      parent_id=None, content="干扰项正文", locator={"page": 1},
+                                      score=0.05, retrieval_source="rerank")]
+
+    async def fake_rerank(query, docs, top_n=5):
+        return docs
+
+    async def fake_chat(messages):
+        return "改写"
+
+    async def fake_chat_stream(messages):
+        yield "答案"
+
+    async def fake_react(retriever, question, tenant_id="default", kb_ids=None,
+                         history=None, memory_context=""):
+        return {"generation": "常识回答", "source": "fallback_unverified"}
+
+    monkeypatch.setattr(RR, "rerank", fake_rerank)
+    monkeypatch.setattr(G, "chat", fake_chat)
+    monkeypatch.setattr(G, "chat_stream", fake_chat_stream)
+    monkeypatch.setattr(RA, "run_react_agent", fake_react)
+
+    grader_called = []
+
+    async def must_not_call(messages):
+        grader_called.append(True)
+        return {"grades": []}
+
+    monkeypatch.setattr(G, "chat_json", must_not_call)
+
+    graph = G.build_graph(FakeRetriever())
+    state = {"question": "特斯拉Model Y的续航是多少公里?", "query": "特斯拉Model Y的续航是多少公里?",
+             "tenant_id": "default", "retry_count": 0, "documents": [], "search_decision": "",
+             "generation": "", "verification": None, "conversation_history": [], "kb_ids": [],
+             "intent": "", "source": "", "mode": "kb", "safety": "allow",
+             "user_id": "default", "memory_context": ""}
+    values = await graph.ainvoke(state, config={"configurable": {"thread_id": "test-threshold"}})
+    assert not grader_called, "低于阈值的证据不应触发grader LLM"
+    assert values.get("documents") == [] and values.get("source") == "fallback_unverified"
+
+
+@pytest.mark.asyncio
 async def test_grade_fallback_clears_documents(monkeypatch):
     """证据全被判无关 → 转tool_agent兜底时documents必须清空, API层citations不再返回无关文档."""
     import src.agents.graph as G

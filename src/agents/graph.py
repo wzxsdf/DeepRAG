@@ -8,6 +8,7 @@ from langgraph.types import Command
 
 from src.agents.routing import classify_chitchat, safety_prefilter
 from src.agents.llm import chat, chat_json, chat_stream
+from src.core.config import get_settings
 from src.prompts import (GRADER_BATCH_PROMPT, GENERATOR_PROMPT, VERIFIER_PROMPT, REWRITE_PROMPT,
     CHITCHAT_PROMPT, AGENT_COMPLEX_JUDGE_PROMPT)
 from src.storage.protocol import RetrievedDocument
@@ -180,6 +181,12 @@ async def _grade_node(state: AgentState) -> Command:
     # ponytail: 评审修复 — 降级前必须清空documents, 否则API响应的citations会把刚被判无关/未检索到的
     # 文档原样返回(引用与答案脱节). 清空后 tool_agent 路径 citations=[] (source=tool/fallback_unverified)
     if not docs:
+        return Command(update={"search_decision": "fallback", "documents": []}, goto="tool_agent")
+    # P1②拒答校准: rerank分数阈值短路 — 标定见config.retrieval_min_score注释(golden top1中位0.927
+    # vs 不可答中位0.012, 双峰分布), 低于阈值直接降级, 省grader LLM且堵"低分证据硬答"的幻觉路径
+    min_score = get_settings().retrieval_min_score
+    if min_score > 0 and max(d.score for d in docs) < min_score:
+        log.info("grade_score_shortfall", top1=max(d.score for d in docs), threshold=min_score)
         return Command(update={"search_decision": "fallback", "documents": []}, goto="tool_agent")
     evidence_list = "\n".join(f"[{i+1}] {d.content[:400]}" for i, d in enumerate(docs))
     try:
