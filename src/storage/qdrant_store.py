@@ -82,8 +82,10 @@ class QdrantWriter:
     def query_hybrid(self, dense_vec: List[float], query_text: str,
                      tenant_id: str = "default", kb_ids: List[str] | None = None, limit: int = 10,
                      acl_tags: List[str] | None = None, active_version_id: str | None = None,
-                     active_version_ids: List[str] | None = None):
-        """hybrid检索: dense+sparse并使用同一组召回前过滤条件."""
+                     active_version_ids: List[str] | None = None,
+                     weights: List[float] | None = None):
+        """hybrid检索: dense+sparse并使用同一组召回前过滤条件.
+        weights默认[0.85,0.15](20261126扫参定案, 与async版一致)."""
         query_filter = self._build_filter(
             tenant_id, kb_ids, acl_tags, active_version_id, active_version_ids)
         dense_res = self.client.query_points(self.collection_name, query=dense_vec, using="dense",
@@ -91,9 +93,9 @@ class QdrantWriter:
         sparse_res = self.client.query_points(self.collection_name,
             query=Document(text=query_text, model="Qdrant/bm25"), using="sparse",
             query_filter=query_filter, limit=limit * 3, with_payload=True)
-        # ponytail: 加权RRF, dense权重0.65主导, 避免BM25共有词噪声拉低排序
+        # ponytail: 加权RRF; 扫参见config.retrieval_sparse_weight注释(0.35旧默认已证伪)
         return reciprocal_rank_fusion(responses=[dense_res.points, sparse_res.points],
-                                       limit=limit, weights=[0.65, 0.35])
+                                       limit=limit, weights=weights or [0.85, 0.15])
 
     async def query_hybrid_async(self, dense_vec: List[float], query_text: str,
                                  tenant_id: str = "default", kb_ids: List[str] | None = None, limit: int = 10,
