@@ -36,11 +36,17 @@ def create_eval_writer() -> QdrantWriter:
 
 
 def delete_eval_collection(writer: QdrantWriter) -> None:
-    """Delete only the unique evaluation collection allocated by this run."""
+    """Delete only the unique evaluation collection allocated by this run.
+    ponytail: 清理失败仅告警不抛(20261126实测: Qdrant代理偶发502会让finally掩盖try块根因;
+    孤儿集合可按eval_前缀巡检清理, 前缀守卫仍保留——非eval_集合拒绝删除)."""
     if not writer.collection_name.startswith("eval_"):
         raise ValueError("Refusing to delete a non-evaluation collection")
-    if writer.client.collection_exists(writer.collection_name):
-        writer.client.delete_collection(writer.collection_name)
+    try:
+        if writer.client.collection_exists(writer.collection_name):
+            writer.client.delete_collection(writer.collection_name)
+    except Exception as e:
+        log.warning("eval_collection_cleanup_failed", collection=writer.collection_name,
+                    error=type(e).__name__, msg=str(e))
 
 
 async def ingest_eval_set(writer: QdrantWriter) -> int:
