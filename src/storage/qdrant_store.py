@@ -98,8 +98,10 @@ class QdrantWriter:
     async def query_hybrid_async(self, dense_vec: List[float], query_text: str,
                                  tenant_id: str = "default", kb_ids: List[str] | None = None, limit: int = 10,
                                  acl_tags: List[str] | None = None, active_version_id: str | None = None,
-                                 active_version_ids: List[str] | None = None):
-        """async版hybrid: dense/sparse并发查询，共用召回前过滤条件."""
+                                 active_version_ids: List[str] | None = None,
+                                 weights: List[float] | None = None):
+        """async版hybrid: dense/sparse并发查询，共用召回前过滤条件.
+        weights: [dense_w, sparse_w]加权RRF(默认[0.65,0.35]; 扫参用, [1.0,0.0]≈纯dense)."""
         query_filter = self._build_filter(
             tenant_id, kb_ids, acl_tags, active_version_id, active_version_ids)
         dense_res, sparse_res = await asyncio.gather(
@@ -110,7 +112,7 @@ class QdrantWriter:
                               query_filter=query_filter, limit=limit * 3, with_payload=True),
         )
         return reciprocal_rank_fusion(responses=[dense_res.points, sparse_res.points],
-                                       limit=limit, weights=[0.65, 0.35])
+                                      limit=limit, weights=weights or [0.65, 0.35])
 
     async def delete_by_kb(self, kb_id: str):
         # ponytail: 按kb_id删points(删KB兜底+检索隔离), 幂等(空集不报错)
