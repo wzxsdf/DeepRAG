@@ -207,7 +207,12 @@ def _load_ckpt_records(ckpt_path: str | None) -> list[dict[str, Any]]:
             records.append(json.loads(line))
         except Exception:
             continue
-    return records
+    # ponytail: 并发分块可能双写同一idx(20261126实测), 聚合按idx去重(保留最后一次写入)
+    by_idx: dict[Any, dict[str, Any]] = {}
+    for r in records:
+        if isinstance(r.get("idx"), int):
+            by_idx[r["idx"]] = r
+    return [by_idx[k] for k in sorted(by_idx)]
 
 
 def _ckpt_append(ckpt_path: str | None, rec: dict[str, Any]) -> None:
