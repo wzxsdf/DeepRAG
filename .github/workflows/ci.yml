@@ -20,12 +20,14 @@ jobs:
       # 最小依赖闭包: 仅单测(tests/unit)实际导入的模块, 避免安装sentence-transformers/docling等重依赖
       # 新单测引入新import时在此追加
       # 20261126评审修复单测追加: langgraph+langchain(graph降级路径假对象测试), oss2(OssStore to_thread测试)
+      # 20261127 P3多租户单测追加: fastapi(HTTPException/依赖)+passlib+python-jose(auth)+aiomysql(repositories→mysql)
       - name: Install test deps
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-asyncio ruff \
             pydantic pydantic-settings structlog redis jieba python-dotenv \
-            qdrant-client httpx langgraph langchain oss2
+            qdrant-client httpx langgraph langchain oss2 \
+            fastapi passlib python-jose aiomysql
 
       - name: Runtime-error lint (E9/F on src+apps)
         run: ruff check --select E9,F src apps
