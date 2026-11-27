@@ -23,6 +23,26 @@
 - **依赖修复(qdrant-client)**:1.12.1 → 1.19.1,`pyproject.toml` 下限提至 `>=1.14.0`。原因:`query_points` 对 `Qdrant/bm25` 的服务端推理透传需 client ≥1.14,1.12 误走本地 fastembed 报 `not among supported models`,导致 **hybrid(BM25 路)检索整体不可用**(P0 级问题);1.20 对 server 1.18.3 有 minor 差 2 的兼容警告,故固定 1.19。
 - **eval_crag 显式 `mode="kb"`**:缺省 mode=quick 会使 graph 进入 tool_agent(联网工具检索),与检索消融口径不可比;修复前 CRAG 行全 0(trial 20261125_002736,已删除该误导性产物)。
 
+### 拒答校准 + hybrid定案 + 端点分数漂移发现(2026-11-27 第七轮)
+
+**① 拒答校准落地与净效应**(用户决策: ②校准 ①hybrid扫参 记忆封存, RAG检索优先):
+- 标定: golden 32问top1中位0.927 vs 不可答10问中位0.012, 双峰分布0.03~0.8有空隙 → `retrieval_min_score=0.30`(env可调) + GRADER prompt收紧("话题相关但不含答案=false")。
+- 不可答验证: 诚实降级 0.80→0.90, 特斯拉幻觉案例修复(原kb_grounded编造→tool诚实作答); 残留1例为"pgvector vs Qdrant"半可答边界(语料确有Qdrant文档)。
+- **净效应是质量提升而非回退**(trial `20261127_120758` vs 基线`20261126_202308`): judge_answer **0.839→0.885~0.903**(两次完整测量稳定抬升) — 基线中5问"答案错却自称grounded"(如[2][11][46][48][51], verifier自洽虚高), 阈值使其诚实降级到通用知识兜底, judge判兜底答案10/12正确; grounded 0.984→0.836~0.855 = 去水分后的真实标签。
+
+**② hybrid定案**(RRF扫参, 5组权重×62问): sparse权重单调恶化, 无任何配置赢dense — 0.15与纯dense逐位持平, 0.35(旧默认)-1.6pt, 0.5/0.7 -3.2pt。**生产默认改0.85/0.15**(≈dense实证最优, 稀疏路保留应对真实长文档语料, `RETRIEVAL_SPARSE_WEIGHT`可调); README头号卖点如实改写"dense+Cross-Encoder精排", hybrid降级为"已实现已消融无增益"。
+
+**③ 一级发现: SiliconFlow rerank分数跨时间窗漂移**。同一问答对在昨日20:23窗口rerank分数0.9+(如[12]口语问→doc_eval R@1=1.0), 夜间/次日窗口同对0.1x(12:05管线追踪实测), 而高词汇重叠对(jieba)两窗口均0.88——疑似服务端模型版本变动, 边界(口语改写型)对分数翻转, 简单对稳定。影响: CRAG recall@1 0.952(基线窗)↔0.806(当前窗)的主要来源; grounded/faith 同理。
+- 防御四件套已落地: rerank全低分(<0.30与阈值同线)自愈重试; sync/async权重对齐; ckpt按idx去重; **坏窗口熔断**(≥8问且可疑率≥75%即中止, ckpt保留换窗续跑)。
+- **窗口指纹预检**: 固定参考对(jieba)打分入trial(本次0.881), 跨窗trial可解释可比。
+- 深夜运维连带发现并修复: 后台长跑~21min静默死亡(防待机+分块断点续跑ckpt, 62问分块完成), DNS/SSH闪断(网络探测等待), 卡死进程无超时挂起(识别PID精确清理)。
+
+**基线重立(trials=3)**: `20261126_202308`(基线参考, 健康窗CRAG+judge) + `20261126_220012`(新权重漏斗) + `20261127_120758`(当前窗完整) → baseline.md; hybrid漏斗行std=0.009如实反映扫参前后两配置(0.823/0.839)。无效窗口/旧配置trial移入 `docs/trials/invalid/`(010659坏窗, 205901/214329旧权重混窗, 201739孤儿), 不参与聚合。
+
+**单元回归**: pytest 48 passed(+阈值短路单测); 窗口指纹/judge smoke/子集对照脚本入 `scripts/`。
+
+**遗留(下一阶段候选)**: reranker对口语改写型问法的真实短板(12/62问无法置信度>0.3命中证据 — kb模式query预改写或本地reranker候选); "pgvector vs Qdrant"半可答边界; P3多租户(用户已确认要做); Agent/记忆优化阶段(记忆已封存待A/B重评)。
+
 ### 评测效度补齐 P1②: golden v3 + 独立judge + 负样本(2026-11-26 第六轮)
 
 **golden v3**(62问×48文档 + UNANSWERABLE 10问, `src/evaluation/golden.py`): v2的54问原样保留并全部补 `answer` 参考答案; 新增8问关键词型(RRF/IDF/InnoDB/BGE-M3等ASCII精确token — BM25稀疏路理论主场, v2只有改写型查询是"hybrid增益无数据"的根因); 10问不可答负样本(语料无答案, 部分含tesla/gpt/k8s干扰检索噪声)。
