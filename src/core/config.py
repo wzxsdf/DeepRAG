@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     # (口语→关键词化+指代消解), 成本1次fast调用(~1s)。False=关闭(旧行为)。
     retrieval_query_rewrite: bool = True
 
+    # --- LLM请求超时(20261127) ---
+    # 单次LLM HTTP调用的硬超时(秒): openai SDK默认600s且chat_json有3套兜底方案×max_retries,
+    # 端点黑洞(无RST的挂起连接)时单问可挂~30min(20261127实测评测卡死13min+)。120s兜底足够
+    # 覆盖正常调用(flash模型p99<30s), 超时走异常路径(自愈重试/评测可疑计数)。
+    chat_request_timeout: int = 120
+
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)
     memory_max_context_tokens: int = 2000    # 历史占用token预算; 超过才触发摘要+窗口

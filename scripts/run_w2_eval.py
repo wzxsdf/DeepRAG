@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 
 if sys.platform == "win32":
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    # line_buffering: 重定向到文件时禁用块缓冲(20261127实测: 块缓冲把挂死前的trace吞掉,
+    # 误判"日志冻结无输出"; 行缓冲保证每条trace即时落盘, 卡死时能看到卡在哪个节点)
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
 
 load_dotenv()
 

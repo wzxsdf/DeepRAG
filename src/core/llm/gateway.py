@@ -44,7 +44,9 @@ class ModelGateway:
             model_str = self._purpose_model(purpose)
             provider = model_str.split(":", 1)[0]
             pcfg = self._s.providers.get(provider)
-            kwargs: dict = {"temperature": 0, "max_retries": 2}
+            # ponytail: 硬超时(20261127实测: 默认600s×3兜底方案在端点黑洞时单问挂~30min)
+            kwargs: dict = {"temperature": 0, "max_retries": 2,
+                            "request_timeout": self._s.chat_request_timeout}
             # ponytail: purpose级输出token封顶(config默认0=不封顶); 长输出只在长尾出现, 封顶直接压p95
             purpose_max_tokens = {"generate": self._s.chat_generate_max_tokens,
                                   "fast": self._s.chat_fast_max_tokens}.get(purpose, 0)

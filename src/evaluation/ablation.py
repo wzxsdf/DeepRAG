@@ -240,17 +240,37 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None,
     retriever = HybridRetriever(qdrant=writer, resolve_active_versions=False)
     graph = build_graph(retriever)
     suspect_n = 0  # 可疑签名: recall@1=0 + 无grounded + 0重试(=检索分数坏/端点退化窗口)
+    QUESTION_TIMEOUT_S = 600  # 单问硬顶(20261127实测: 无timeout时端点黑洞可挂13min+, CPU栈=事件循环空等IOCP)
+    timeout_n = 0
     for idx in pending:
         item = golden[idx]
         cfg = {"configurable": {"thread_id": f"crag-{uuid.uuid4().hex}"}}
         started = time.perf_counter()
         # ponytail: checkpointer已移除(评审P2) — ainvoke直接返回最终state, 不再aget_state
-        values = await graph.ainvoke(
-            {"question": item["q"], "query": item["q"], "tenant_id": "default", "retry_count": 0,
-             "documents": [], "search_decision": "", "generation": "", "verification": None,
-             "mode": "kb"},  # ponytail: 显式kb模式走CRAG检索闭环; 缺省quick会进tool_agent(联网), 与检索消融不可比
-            config=cfg,
-        )
+        try:
+            values = await asyncio.wait_for(
+                graph.ainvoke(
+                    {"question": item["q"], "query": item["q"], "tenant_id": "default", "retry_count": 0,
+                     "documents": [], "search_decision": "", "generation": "", "verification": None,
+                     "mode": "kb"},  # ponytail: 显式kb模式走CRAG检索闭环; 缺省quick会进tool_agent(联网), 与检索消融不可比
+                    config=cfg,
+                ), timeout=QUESTION_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # 挂死→记可疑超时记录继续跑(不丢进度); 超时签名自然满足可疑判定(0分+无grounded+0重试)→坏窗口熔断会接手
+            timeout_n += 1
+            log.warning("eval_crag_question_timeout", idx=idx, q=item["q"][:40], timeout_s=QUESTION_TIMEOUT_S)
+            _ckpt_append(ckpt_path, {"idx": idx, "q": item["q"], "lat_ms": QUESTION_TIMEOUT_S * 1000,
+                                     "recall@1": 0.0, "recall@5": 0.0, "mrr@5": 0.0, "ndcg@5": 0.0,
+                                     "grounded": False, "citations_valid": False, "retries": 0,
+                                     "judge_answer": None, "judge_grounded": None,
+                                     "judge_citation": None, "timeout": True})
+            records.append({"idx": idx, "q": item["q"], "lat_ms": QUESTION_TIMEOUT_S * 1000,
+                            "recall@1": 0.0, "recall@5": 0.0, "mrr@5": 0.0, "ndcg@5": 0.0,
+                            "grounded": False, "citations_valid": False, "retries": 0,
+                            "judge_answer": None, "judge_grounded": None, "judge_citation": None,
+                            "timeout": True})
+            suspect_n += 1
+            continue
         lat_ms = (time.perf_counter() - started) * 1000
         metrics = _metrics([doc.document_id for doc in values.get("documents", [])],
                            set(item["relevant"]))
@@ -283,8 +303,13 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None,
         # P1②: 独立judge对照参考答案评分(带answer字段的问题才评)
         ref = item.get("answer")
         if ref:
-            j = await _judge_answer(item["q"], values.get("generation", ""),
-                                    values.get("documents", []), ref)
+            try:
+                j = await asyncio.wait_for(
+                    _judge_answer(item["q"], values.get("generation", ""),
+                                  values.get("documents", []), ref), timeout=180)
+            except asyncio.TimeoutError:
+                log.warning("eval_crag_judge_timeout", idx=idx)
+                j = None
             if j is not None:
                 rec["judge_answer"] = bool(j.get("answer_correct"))
                 rec["judge_grounded"] = bool(j.get("grounded"))
