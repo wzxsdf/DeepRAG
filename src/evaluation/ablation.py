@@ -3,6 +3,7 @@
 # (20261126实测两次, 日志冻结无Traceback), 分块+续跑使任何一次死亡只损失当前块
 
 import json
+import asyncio
 import math
 import os
 import time
