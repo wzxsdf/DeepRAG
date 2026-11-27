@@ -57,16 +57,28 @@ python -m apps.api.main
 ## 查询示例
 
 ```bash
+# 注册拿token(P3起 /query 强制鉴权; tenant从token贯通, 请求体tenant_id被忽略)
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"a@b.c","password":"secret66"}' | python -c "import sys,json;print(json.load(sys.stdin)['token'])")
+
 # 单轮
 curl -X POST http://localhost:8000/api/v1/query \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"question":"DeepRAG的检索层用了什么技术?"}'
 
 # 多轮 (conversation_id 复用上下文)
 curl -X POST http://localhost:8000/api/v1/query \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" \
   -d '{"question":"它输出多少维?","conversation_id":"sess-1"}'
 ```
+
+## 鉴权与多租户(P3)
+
+- **强制鉴权**: 除 `/auth/*`、`/health`、`/` 外所有业务接口需 `Authorization: Bearer <JWT>`; 未带/无效 token → 401(不再有匿名 `default` 用户兜底)。
+- **KB 归属**: `knowledge_bases.owner_id` — 新建 KB 归属创建者(私有); `NULL` 为公共库(存量兼容, 登录用户均可见)。私有库的读/写/删/上传/检索一律仅 owner, 越权 → 403; `/query` 的 `kb_ids` 逐个校验, 防枚举他人 kb_id 越权检索。
+- **tenant 贯通**: tenant_id 从 JWT → users 表 → 检索过滤/入库/缓存世代全链路取自服务端, 请求体 `tenant_id` 字段被忽略(防跨租户伪造)。
+- **缓存隔离**: 查询结果缓存键含 user_id, 不同用户同问题不复用缓存。
 
 ## 文档
 

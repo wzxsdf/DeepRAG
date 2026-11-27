@@ -7,13 +7,20 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from src.storage.mysql import MySQLStore
-from src.storage.repositories import ConversationRepository
-from src.security.auth import oauth2_scheme, decode_token
+from src.storage.repositories import ConversationRepository, KBRepository
+from src.security.auth import get_current_user
+from apps.api.access import ensure_kb_readable
 from src.core.lifespan import get_graph, get_mysql, get_memory_manager, get_memory_queue
 from src.core.logging import log
 from src.cache import get_hybrid_cache
 
 router = APIRouter(prefix="/api/v1", tags=["query"])
+
+
+async def _ensure_kbs_readable(kb_ids: list[str] | None, user_id: str, mysql: MySQLStore):
+    """P3: 请求里的kb_ids逐个校验可见性 — 私有库非owner→403, 防枚举他人kb_id越权检索."""
+    for kb_id in (kb_ids or []):
+        ensure_kb_readable(await KBRepository(mysql).get(kb_id), user_id)
 
 
 async def _load_history(mysql, conv_id):
@@ -61,16 +68,10 @@ async def _persist(mysql, conv_id, user_id, question, ans):
     await repo.save_message(conv_id, user_id, "assistant", ans)
 
 
-def _user_id_from_token(token):
-    if not token:
-        return "default"
-    return decode_token(token) or "default"
-
-
 class QueryRequest(BaseModel):
     question: str
-    tenant_id: str = "default"
-    kb_ids: list[str] | None = None  # 限定检索的知识库(None/空=全部)
+    tenant_id: str = "default"  # 已废弃(P3): tenant从JWT→users表贯通, 请求值被忽略(防跨租户伪造)
+    kb_ids: list[str] | None = None  # 限定检索的知识库(None/空=全部可见库)
     conversation_id: str | None = None
     mode: str = "quick"  # ponytail: quick/kb/agent, 用户显式选(取代LLM意图识别)
 
@@ -125,18 +126,23 @@ def _step_detail(node: str, update: dict) -> dict:
 
 
 @router.post("/query", response_model=QueryResponse)
-async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
+async def query(req: QueryRequest, user: dict = Depends(get_current_user),
                 graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql),
                 memory_manager=Depends(get_memory_manager),
                 memory_queue=Depends(get_memory_queue)):
+    # P3多租户: 强制鉴权(user_id/tenant_id从JWT→users表贯通, 请求体tenant_id被忽略防伪造);
+    # kb_ids逐个校验可见性(私有库非owner→403); 缓存键加user_id(不同用户不共享答案缓存)
     conv_id = req.conversation_id or str(uuid.uuid4())
-    user_id = _user_id_from_token(token)
+    user_id = user["user_id"]
+    tenant_id = user["tenant_id"]
     history = await _manage_history(memory_manager, await _load_history(mysql, conv_id))
+    await _ensure_kbs_readable(req.kb_ids, user_id, mysql)
 
     # ponytail: 缓存检查 - 先尝试从缓存获取结果(仅非多轮的首问走缓存, 多轮带conversation_id不缓存)
     cache = get_hybrid_cache()
     cache_filters = {
-        "tenant_id": req.tenant_id,
+        "tenant_id": tenant_id,
+        "user_id": user_id,  # P3: 答案缓存按用户隔离(不同用户同问题不复用)
         "kb_ids": req.kb_ids or [],
         "mode": req.mode
     }
@@ -157,7 +163,7 @@ async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
     # ainvoke直接返回最终state, 多轮上下文每次从MySQL重建
     cfg = {"configurable": {"thread_id": conv_id}}
     values = await graph.ainvoke(
-        {"question": req.question, "query": req.question, "tenant_id": req.tenant_id,
+        {"question": req.question, "query": req.question, "tenant_id": tenant_id,
          "retry_count": 0, "documents": [], "search_decision": "", "generation": "", "verification": None,
          "conversation_history": history, "kb_ids": req.kb_ids or [], "intent": "", "source": "",
          "mode": req.mode, "safety": "allow", "user_id": user_id, "memory_context": ""}, config=cfg)
@@ -187,14 +193,17 @@ async def query(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
 
 
 @router.post("/query/stream")
-async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_scheme),
+async def query_stream(req: QueryRequest, user: dict = Depends(get_current_user),
                        graph=Depends(get_graph), mysql: MySQLStore = Depends(get_mysql),
                        memory_manager=Depends(get_memory_manager),
                        memory_queue=Depends(get_memory_queue)):
-    """SSE流式: 推送Agent各节点进度(step事件) + 最终done事件(answer+citations). 非token级(LLM非流), 展示Agent流程."""
+    """SSE流式: 推送Agent各节点进度(step事件) + 最终done事件(answer+citations). 非token级(LLM非流), 展示Agent流程.
+    P3: 强制鉴权+tenant贯通, 同/query."""
     conv_id = req.conversation_id or str(uuid.uuid4())
-    user_id = _user_id_from_token(token)
+    user_id = user["user_id"]
+    tenant_id = user["tenant_id"]
     history = await _manage_history(memory_manager, await _load_history(mysql, conv_id))
+    await _ensure_kbs_readable(req.kb_ids, user_id, mysql)
     cfg = {"configurable": {"thread_id": conv_id}}  # ponytail: P0 checkpoint修复 — 复用conversation_id
 
     async def event_gen():
@@ -202,7 +211,7 @@ async def query_stream(req: QueryRequest, token: str | None = Depends(oauth2_sch
         # checkpointer已移除(评审P2): 最终state从updates流累积, 不再aget_state
         state_acc: dict = {}
         async for mode, data in graph.astream(
-            {"question": req.question, "query": req.question, "tenant_id": req.tenant_id,
+            {"question": req.question, "query": req.question, "tenant_id": tenant_id,
              "retry_count": 0, "documents": [], "search_decision": "", "generation": "", "verification": None,
              "conversation_history": history, "kb_ids": req.kb_ids or [], "intent": "", "source": "",
              "mode": req.mode, "safety": "allow", "user_id": user_id, "memory_context": ""},

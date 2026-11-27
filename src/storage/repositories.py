@@ -42,17 +42,30 @@ class KBRepository:
     def __init__(self, mysql: MySQLStore):
         self._m = mysql
 
-    async def create(self, id: str, tenant_id: str, name: str):
-        await self._m.execute("INSERT IGNORE INTO tenants (id, name) VALUES ('default','Default')")
-        await self._m.execute("INSERT INTO knowledge_bases (id, tenant_id, name) VALUES (%s,%s,%s)",
-                             id, tenant_id, name)
+    async def ensure_schema(self):
+        """P3: knowledge_bases补owner_id列(幂等, 存量库NULL=公共/legacy兼容). 收敛到lifespan调用."""
+        cols = {r["Field"] for r in await self._m.fetch("SHOW COLUMNS FROM knowledge_bases")}
+        if "owner_id" not in cols:
+            await self._m.execute("ALTER TABLE knowledge_bases ADD COLUMN owner_id VARCHAR(50) NULL")
 
-    async def list_with_doc_count(self) -> list[KBWithCount]:
-        rows = await self._m.fetch(
-            "SELECT kb.id, kb.name, kb.created_at, COUNT(d.id) AS doc_count "
-            "FROM knowledge_bases kb LEFT JOIN documents d "
-            "ON d.kb_id=kb.id AND d.deleted_at IS NULL "
-            "WHERE kb.deleted_at IS NULL GROUP BY kb.id,kb.name,kb.created_at ORDER BY kb.created_at DESC")
+    async def create(self, id: str, tenant_id: str, name: str, owner_id: str | None = None):
+        await self._m.execute("INSERT IGNORE INTO tenants (id, name) VALUES ('default','Default')")
+        await self._m.execute(
+            "INSERT INTO knowledge_bases (id, tenant_id, owner_id, name) VALUES (%s,%s,%s,%s)",
+            id, tenant_id, owner_id, name)
+
+    async def list_with_doc_count(self, user_id: str | None = None) -> list[KBWithCount]:
+        """KB列表(含文档数). P3: 传user_id则只返回公共库+该用户私有库; None=不过滤(监控/脚本用)."""
+        sql = ("SELECT kb.id, kb.name, kb.created_at, COUNT(d.id) AS doc_count "
+               "FROM knowledge_bases kb LEFT JOIN documents d "
+               "ON d.kb_id=kb.id AND d.deleted_at IS NULL "
+               "WHERE kb.deleted_at IS NULL")
+        args: tuple = ()
+        if user_id is not None:
+            sql += " AND (kb.owner_id IS NULL OR kb.owner_id=%s)"
+            args = (user_id,)
+        sql += " GROUP BY kb.id,kb.name,kb.created_at ORDER BY kb.created_at DESC"
+        rows = await self._m.fetch(sql, *args)
         return [KBWithCount(id=r["id"], name=r["name"], doc_count=r["doc_count"], created_at=r["created_at"])
                 for r in rows]
 
@@ -61,7 +74,8 @@ class KBRepository:
         if not r:
             return None
         return KnowledgeBase(id=r["id"], tenant_id=r["tenant_id"], name=r["name"], status=r.get("status", "ACTIVE"),
-                             deleted_at=r.get("deleted_at"), deleted_by=r.get("deleted_by"), created_at=r.get("created_at"))
+                             owner_id=r.get("owner_id"), deleted_at=r.get("deleted_at"),
+                             deleted_by=r.get("deleted_by"), created_at=r.get("created_at"))
 
     async def find_including_deleted(self, kb_id: str) -> dict | None:
         # 幂等检查: 故意不过滤deleted_at(已删→返回deleted_at非空, 调用方据此判幂等)
@@ -92,7 +106,9 @@ class DocumentRepository:
         await self._m.execute("INSERT IGNORE INTO knowledge_bases (id, tenant_id, name) VALUES ('default','default','Default KB')")
         await self._m.execute("INSERT INTO documents (id, kb_id, title) VALUES (%s,%s,%s)", id, kb_id, title)
 
-    async def list_active(self, kb_id: str | None = None) -> list[DocumentListItem]:
+    async def list_active(self, kb_id: str | None = None,
+                          accessible_owner: str | None = None) -> list[DocumentListItem]:
+        """文档列表. P3: accessible_owner(用户id)时只列出公共库+该用户私有库的文档; kb_id为精确过滤."""
         sql = ("SELECT d.id, d.title, d.kb_id, dv.status AS version_status, j.stage, j.status AS job_status, d.created_at "
                "FROM documents d LEFT JOIN document_versions dv ON dv.document_id=d.id "
                "LEFT JOIN indexing_jobs j ON j.version_id=dv.id WHERE d.deleted_at IS NULL")
@@ -100,6 +116,9 @@ class DocumentRepository:
         if kb_id:
             sql += " AND d.kb_id=%s"
             args = (kb_id,)
+        if accessible_owner is not None:
+            sql += (" AND (SELECT kb.owner_id FROM knowledge_bases kb WHERE kb.id=d.kb_id) IN (NULL, %s)")
+            args = (*args, accessible_owner)
         sql += " ORDER BY d.created_at DESC LIMIT 100"
         rows = await self._m.fetch(sql, *args)
         return [DocumentListItem(id=r["id"], title=r["title"], kb_id=r["kb_id"],
@@ -108,18 +127,19 @@ class DocumentRepository:
 
     async def get_detail(self, doc_id: str) -> DocumentDetail | None:
         r = await self._m.fetchrow(
-            "SELECT d.id, d.title, dv.status AS version_status, dv.id AS version_id, j.stage, j.status AS job_status, j.error_msg "
+            "SELECT d.id, d.title, d.kb_id, dv.status AS version_status, dv.id AS version_id, j.stage, j.status AS job_status, j.error_msg "
             "FROM documents d LEFT JOIN document_versions dv ON dv.document_id=d.id "
             "LEFT JOIN indexing_jobs j ON j.version_id=dv.id WHERE d.id=%s AND d.deleted_at IS NULL", doc_id)
         if not r:
             return None
         return DocumentDetail(document_id=r["id"], title=r["title"], version_id=r.get("version_id"),
                              status=r.get("version_status") or r.get("job_status") or "UNKNOWN",
-                             stage=r.get("stage"), error_msg=r.get("error_msg"))
+                             stage=r.get("stage"), error_msg=r.get("error_msg"), kb_id=r.get("kb_id"))
 
     async def find_for_delete(self, doc_id: str) -> dict | None:
         # 幂等检查: 返回{deleted_at}行(NULL=未删/时间戳=已删)或None(记录不存在), 调用方据此区分404/幂等/删除
-        return await self._m.fetchrow("SELECT deleted_at FROM documents WHERE id=%s", doc_id)
+        # P3: 带kb_id供归属校验
+        return await self._m.fetchrow("SELECT deleted_at, kb_id FROM documents WHERE id=%s", doc_id)
 
     async def set_active_version(self, document_id: str, version_id: str) -> int:
         """原子切换文档活动版本，仅允许已索引版本成为当前版本."""

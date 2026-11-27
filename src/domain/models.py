@@ -22,6 +22,7 @@ class KnowledgeBase:
     tenant_id: str
     name: str
     status: str = "ACTIVE"
+    owner_id: str | None = None  # P3: NULL=公共库(legacy兼容, 登录用户均可见), 非NULL=私有(仅owner)
     deleted_at: str | None = None
     deleted_by: str | None = None
     created_at: str | None = None
@@ -114,6 +115,7 @@ class DocumentDetail:
     status: str = "UNKNOWN"
     stage: str | None = None
     error_msg: str | None = None
+    kb_id: str | None = None  # P3: 供归属校验(经kb的owner_id判可见性)
 
 
 @dataclass

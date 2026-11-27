@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS knowledge_bases (
     id VARCHAR(50) PRIMARY KEY,
     tenant_id VARCHAR(50),
+    owner_id VARCHAR(50) NULL,             -- P3归属: NULL=公共库(legacy兼容), 非NULL=私有(仅owner可见/可操作)
     name VARCHAR(100) NOT NULL,
     embedding_model VARCHAR(50) DEFAULT 'BGE-M3',
     config_json JSON,

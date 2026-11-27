@@ -9,6 +9,7 @@ from src.storage.oss import OssStore
 from src.storage.repositories import KBRepository
 from src.security.auth import get_current_user
 from src.core.lifespan import get_mysql, get_qdrant, get_oss
+from apps.api.access import ensure_kb_writable
 from apps.api.documents import purge_document  # ponytail: 复用documents的purge(DRY, 删KB=循环删其下文档)
 
 router = APIRouter(prefix="/api/v1", tags=["knowledge-bases"])
@@ -23,28 +24,28 @@ class KbRename(BaseModel):
 
 
 @router.post("/kbs")
-async def create_kb(req: KbCreate, _=Depends(get_current_user), mysql: MySQLStore = Depends(get_mysql)):
-    """创建知识库."""
+async def create_kb(req: KbCreate, user=Depends(get_current_user), mysql: MySQLStore = Depends(get_mysql)):
+    """创建知识库. P3: 归属当前用户(私有库)."""
     kb_id = str(uuid.uuid4())
-    await KBRepository(mysql).create(kb_id, "default", req.name)
+    await KBRepository(mysql).create(kb_id, user.get("tenant_id", "default"), req.name, owner_id=user["user_id"])
     return {"id": kb_id, "name": req.name}
 
 
 @router.get("/kbs")
-async def list_kbs(_=Depends(get_current_user), mysql: MySQLStore = Depends(get_mysql)):
-    """知识库列表(含文档数, 过滤已软删的kb与文档)."""
-    kbs = await KBRepository(mysql).list_with_doc_count()
+async def list_kbs(user=Depends(get_current_user), mysql: MySQLStore = Depends(get_mysql)):
+    """知识库列表(含文档数, 过滤已软删). P3: 仅公共库+当前用户私有库."""
+    kbs = await KBRepository(mysql).list_with_doc_count(user_id=user["user_id"])
     return [{"id": k.id, "name": k.name, "doc_count": k.doc_count, "created_at": str(k.created_at)} for k in kbs]
 
 
 @router.patch("/kbs/{kb_id}")
-async def rename_kb(kb_id: str, req: KbRename, _=Depends(get_current_user), mysql: MySQLStore = Depends(get_mysql)):
-    """重命名知识库(元数据更新)."""
+async def rename_kb(kb_id: str, req: KbRename, user=Depends(get_current_user),
+                    mysql: MySQLStore = Depends(get_mysql)):
+    """重命名知识库(元数据更新). P3: 私有库仅owner可改."""
     repo = KBRepository(mysql)
-    if not await repo.get(kb_id):
-        raise HTTPException(404, "知识库不存在")
-    await repo.rename(kb_id, req.name)
-    return {"id": kb_id, "name": req.name}
+    kb = ensure_kb_writable(await repo.get(kb_id), user["user_id"])
+    await repo.rename(kb.id, req.name)
+    return {"id": kb.id, "name": req.name}
 
 
 @router.delete("/kbs/{kb_id}")
@@ -53,16 +54,18 @@ async def delete_kb(kb_id: str, user=Depends(get_current_user),
                     oss: OssStore = Depends(get_oss),
                     qdrant: QdrantWriter = Depends(get_qdrant)):
     """删除知识库: 软删kb(审计) + 物理清理所有文档(Qdrant/OSS/MySQL子表).
-    ponytail: 跨存储一致性 — 置DELETING(禁并发上传)→逐文档purge→Qdrant按kb兜底→软删kb. 幂等."""
+    ponytail: 跨存储一致性 — 置DELETING(禁并发上传)→逐文档purge→Qdrant按kb兜底→软删kb. 幂等.
+    P3: 私有库仅owner可删."""
     if kb_id == "default":
         raise HTTPException(403, "默认知识库不可删除")
     repo = KBRepository(mysql)
-    # ponytail: 幂等检查用不过滤deleted_at(find_including_deleted); get过滤了已删会误404
+    # ponytail: 幂等检查用不过滤deleted_at(find_including_deleted); get过滤了已删会误404 — 先幂等后归属
     row = await repo.find_including_deleted(kb_id)
     if not row:
         raise HTTPException(404, "知识库不存在")
     if row.get("deleted_at"):
         return {"id": kb_id, "status": "DELETED"}  # 幂等: 已删直接返回
+    ensure_kb_writable(await repo.get(kb_id), user["user_id"])
     await repo.set_status(kb_id, "DELETING")  # 置DELETING — confirm上传会校验status拒绝(并发保护)
     doc_ids = await repo.list_document_ids(kb_id)
     for doc_id in doc_ids:

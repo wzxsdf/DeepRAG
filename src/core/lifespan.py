@@ -14,7 +14,7 @@ from src.storage.oss import OssStore
 from src.retrieval.hybrid import HybridRetriever
 from src.agents.graph import build_graph
 from src.core.llm import ModelGateway, get_gateway
-from src.storage.repositories import UserRepository, ConversationRepository
+from src.storage.repositories import UserRepository, ConversationRepository, KBRepository
 
 
 @dataclass
@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     # ponytail: 阶段4 — 启动收敛运行时DDL(users补name/password_hash列 + conversation_messages建表), 替代路由每次_ensure_*
     await UserRepository(mysql).ensure_schema()
     await ConversationRepository(mysql).ensure_schema()
+    await KBRepository(mysql).ensure_schema()  # P3: knowledge_bases补owner_id列(幂等)
     qdrant = QdrantWriter(cfg=s.qdrant_cfg)
     oss = OssStore(cfg=s.oss_cfg)
     gateway = get_gateway()  # ponytail: 阶段2 — 启动触发ModelGateway初始化(缓存预热+langfuse handler+日志), 与agents/llm.py共用单例

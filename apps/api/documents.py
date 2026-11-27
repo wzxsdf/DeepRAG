@@ -11,6 +11,7 @@ from src.storage.repositories import (KBRepository, DocumentRepository,
     DocumentVersionRepository, IndexingJobRepository, ChunkRepository)
 from src.security.auth import get_current_user
 from src.core.lifespan import get_mysql, get_oss, get_qdrant
+from apps.api.access import ensure_kb_readable
 
 router = APIRouter(prefix="/api/v1", tags=["documents"])
 
@@ -82,12 +83,12 @@ async def presign_upload(req: PresignRequest, oss: OssStore = Depends(get_oss)) 
 async def confirm_upload(req: ConfirmUploadRequest, background_tasks: BackgroundTasks,
                          user=Depends(get_current_user),
                          mysql: MySQLStore = Depends(get_mysql)) -> DocumentResponse:
-    """确认上传,触发入库. 校验KB可写(非DELETING/DELETED, 并发保护)."""
+    """确认上传,触发入库. 校验KB可写(非DELETING/DELETED, 并发保护). P3: 私有库仅owner可传."""
     document_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
     # ponytail: 并发保护 — KB正在删除/已删除则拒绝上传(409)
-    kb = await KBRepository(mysql).get(req.kb_id)
+    kb = ensure_kb_readable(await KBRepository(mysql).get(req.kb_id), user["user_id"])
     if not kb:
         raise HTTPException(404, "知识库不存在")
     if kb.status in ("DELETING", "DELETED"):
@@ -103,18 +104,30 @@ async def confirm_upload(req: ConfirmUploadRequest, background_tasks: Background
 
 
 @router.get("/documents")
-async def list_documents(kb_id: str | None = None, _=Depends(get_current_user),
+async def list_documents(kb_id: str | None = None, user=Depends(get_current_user),
                          mysql: MySQLStore = Depends(get_mysql)):
-    """文档列表(含入库状态, 过滤已软删). 可按kb_id过滤. join documents+versions+jobs."""
-    docs = await DocumentRepository(mysql).list_active(kb_id)
+    """文档列表(含入库状态, 过滤已软删). 可按kb_id过滤. join documents+versions+jobs.
+    P3: 仅公共库+当前用户私有库的文档."""
+    if kb_id:  # 指定kb时顺带做归属校验(404/403语义明确)
+        await _kb_readable_by_id(kb_id, user["user_id"], mysql)
+    docs = await DocumentRepository(mysql).list_active(kb_id, accessible_owner=user["user_id"])
     return [{"id": d.id, "title": d.title, "kb_id": d.kb_id, "status": d.status,
              "stage": d.stage, "created_at": str(d.created_at)} for d in docs]
 
 
+async def _kb_readable_by_id(kb_id: str, user_id: str, mysql: MySQLStore):
+    """按id取KB并校验读权限(access.ensure_kb_readable的路由侧薄封装)."""
+    return ensure_kb_readable(await KBRepository(mysql).get(kb_id), user_id)
+
+
 @router.get("/documents/{document_id}/preview")
-async def preview_document(document_id: str, mysql: MySQLStore = Depends(get_mysql),
-                           oss: OssStore = Depends(get_oss)):
-    """返回原文PDF的presigned GET URL, 供前端在线预览."""
+async def preview_document(document_id: str, user=Depends(get_current_user),
+                           mysql: MySQLStore = Depends(get_mysql), oss: OssStore = Depends(get_oss)):
+    """返回原文PDF的presigned GET URL, 供前端在线预览. P3: 文档所在KB须可见."""
+    row = await DocumentRepository(mysql).find_for_delete(document_id)
+    if not row:
+        raise HTTPException(404, "文档不存在")
+    await _kb_readable_by_id(row["kb_id"], user["user_id"], mysql)
     oss_key = await DocumentVersionRepository(mysql).latest_oss_key(document_id)
     if not oss_key:
         raise HTTPException(404, "文档原文未找到")
@@ -123,11 +136,13 @@ async def preview_document(document_id: str, mysql: MySQLStore = Depends(get_mys
 
 
 @router.get("/documents/{document_id}")
-async def get_document(document_id: str, mysql: MySQLStore = Depends(get_mysql)):
-    """查询文档状态(过滤已软删)."""
+async def get_document(document_id: str, user=Depends(get_current_user),
+                       mysql: MySQLStore = Depends(get_mysql)):
+    """查询文档状态(过滤已软删). P3: 文档所在KB须可见."""
     d = await DocumentRepository(mysql).get_detail(document_id)
     if not d:
         raise HTTPException(404, "文档不存在")
+    await _kb_readable_by_id(d.kb_id, user["user_id"], mysql)
     return {"document_id": d.document_id, "title": d.title, "version_id": d.version_id,
             "status": d.status, "stage": d.stage, "error_msg": d.error_msg}
 
@@ -137,13 +152,15 @@ async def delete_document(document_id: str, user=Depends(get_current_user),
                           mysql: MySQLStore = Depends(get_mysql),
                           oss: OssStore = Depends(get_oss),
                           qdrant: QdrantWriter = Depends(get_qdrant)):
-    """删除文档: 软删documents(审计) + 物理清理Qdrant/OSS/MySQL子表. 幂等(已删返回DELETED)."""
+    """删除文档: 软删documents(审计) + 物理清理Qdrant/OSS/MySQL子表. 幂等(已删返回DELETED).
+    P3: 文档所在KB私有且非owner→403."""
     doc_repo = DocumentRepository(mysql)
     row = await doc_repo.find_for_delete(document_id)
     if not row:
         raise HTTPException(404, "文档不存在")
     if row.get("deleted_at"):
         return {"document_id": document_id, "status": "DELETED"}  # 幂等
+    await _kb_readable_by_id(row["kb_id"], user["user_id"], mysql)
     await purge_document(document_id, user["user_id"], mysql, oss, qdrant,
                          user.get("tenant_id", "default"))
     return {"document_id": document_id, "status": "DELETED"}
