@@ -9,6 +9,8 @@ import sys
 import io
 from pathlib import Path
 
+from src.evaluation.golden import GOLDEN_VERSION
+
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
@@ -20,7 +22,7 @@ CRAG_METRICS = ["faithfulness", "citation_acc", "judge_answer", "judge_grounded"
 FORMAT_INT = {"retries_total", "judge_n"}
 
 
-def load_trials(trial_ids=None, marker: str = "Golden v3"):
+def load_trials(trial_ids=None, marker: str = f"Golden {GOLDEN_VERSION}"):
     """返回 [(trial_id, {config: {metric: float}})]; 仅指定口径(显式指定trial_id时不过滤口径)."""
     trials = []
     for path in sorted(TRIALS_DIR.glob("*_w2_ablation.csv")):
@@ -58,7 +60,7 @@ def _fmt(values, key):
 
 def main():
     args = sys.argv[1:]
-    marker = "Golden v2" if "--v2" in args else "Golden v3"
+    marker = "Golden v2" if "--v2" in args else f"Golden {GOLDEN_VERSION}"
     trial_ids = [a for a in args if not a.startswith("--")] or None
     trials = load_trials(trial_ids, marker=marker)
     assert trials, "docs/trials 下无可聚合的 trial CSV"

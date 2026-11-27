@@ -1,4 +1,4 @@
-"""golden v3 数据完整性(P1②评测效度) — 纯数据断言, 无外部服务, CI可跑."""
+"""golden v4 数据完整性(P1②评测效度) — 纯数据断言, 无外部服务, CI可跑."""
 
 import re
 
@@ -15,9 +15,9 @@ DOC_IDS = {doc_id for doc_id, _ in DOCUMENTS}
 
 
 def test_version_and_scale():
-    assert GOLDEN_VERSION == "v3"
-    assert len(GOLDEN) == 62, "v3 = v2的54问 + 8关键词型"
-    assert len(UNANSWERABLE) >= 10
+    assert GOLDEN_VERSION == "v4"
+    assert len(GOLDEN) == 100, "v4 = v3的62问 + 38新问(20口语+8跨簇+10关键词)"
+    assert len(UNANSWERABLE) >= 18
 
 
 def test_all_questions_have_reference_answer():
@@ -40,8 +40,14 @@ def test_all_topics_covered():
     assert TOPIC_IDS <= covered, f"未覆盖主题: {TOPIC_IDS - covered}"
 
 
+def test_no_duplicate_questions():
+    """v4新增: 逐字重复问会虚增样本量/污染逐问配对对照."""
+    qs = [g["q"] for g in GOLDEN]
+    assert len(qs) == len(set(qs)), "存在逐字重复问题"
+
+
 def test_keyword_queries_contain_ascii_tokens():
-    """v3尾部8问为关键词型(含ASCII精确token) — BM25稀疏路应发挥的查询类型."""
+    """清单不变式: 尾部8问为关键词型(含ASCII精确token) — BM25稀疏路应发挥的查询类型."""
     tail8 = GOLDEN[-8:]
     for g in tail8:
         assert re.search(r"[A-Za-z]", g["q"]), f"关键词型问句无ASCII token: {g['q']}"

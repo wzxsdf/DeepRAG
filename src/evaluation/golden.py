@@ -1,5 +1,5 @@
 # ponytail: 评估文档集(确定性id) + Golden问题(标注relevant doc ids + 参考答案) + 不可答负样本
-# golden v3(20261126定版): v2的54问原样保留并补"answer"参考答案 + 新增8问关键词型 + UNANSWERABLE 10问
+# golden v4(20261127定版): v3的62问原样保留 + 新增38问(20口语改写型+8跨簇+10关键词型) + UNANSWERABLE扩到18问
 # 设计规则:
 #   1. 每个主题文档是自包含短段落, 关键事实落在前150字符内(kb模式证据截断窗口)
 #   2. 干扰项与主题语义近似但不作为任何问题的relevant, 考验 dense 被噪声误导、hybrid/rerank 纠偏
@@ -9,6 +9,9 @@
 #   5. v3全部GOLDEN问带answer参考答案: 独立judge(异模型)据此评answer_correct, 替代verifier自评(1.000无信息量)
 #   6. UNANSWERABLE 10问: 语料完全不含答案(可含干扰项检索噪声), 期望行为=grade判无关→降级兜底
 #      (citations为空+source!=kb_grounded), 评"诚实降级率"——v2无负样本, 拒答路径从未被测过
+#   7. v4新增动机: golden v3实测评测出剩余10缺口问的失败签名=文档在候选池但cross-encoder打分<0.30
+#      (口语问↔关键词化文档配对是精排薄弱轴), 故v4按3:1:1.3加厚口语改写型/跨簇/关键词型, 使reranker
+#      A/B(20261128 Qwen3-Reranker vs bge-v2-m3)在该轴上有足够统计功效
 
 DOCUMENTS = [
     # --- 主题文档(被golden引用) ---
@@ -74,7 +77,7 @@ DISTRACTOR_IDS = frozenset({
 # 主题文档id集合(UNANSWERABLE完整性校验/judge口径用)
 TOPIC_IDS = frozenset(doc_id for doc_id, _ in DOCUMENTS if doc_id not in DISTRACTOR_IDS)
 
-GOLDEN_VERSION = "v3"
+GOLDEN_VERSION = "v4"
 
 GOLDEN = [
     # --- v1的10问原样保留(基线可对比) ---
@@ -144,6 +147,47 @@ GOLDEN = [
     {"q": "阿里云OSS给前端做临时下载的机制叫什么?", "relevant": ["doc_oss"], "answer": "签名URL"},
     {"q": "structlog输出的日志是什么形态?", "relevant": ["doc_structlog"], "answer": "键值对(机器可解析)"},
     {"q": "BGE-Reranker属于哪类精排模型架构?", "relevant": ["doc_retrieval"], "answer": "交叉编码器(Cross-Encoder)"},  # crossencoder干扰项同域考验区分
+    # --- v4新增: 口语改写型(20问) — 对准精排薄弱轴: 口语问↔关键词化文档配对(cross-encoder打分瓶颈) ---
+    {"q": "DeepRAG那套自己查自己纠的循环,分哪几步?", "relevant": ["doc_arch"], "answer": "检索、评估、生成、校验"},
+    {"q": "项目检索完拿什么模型给结果重新排座次?", "relevant": ["doc_retrieval"], "answer": "BGE-Reranker(交叉编码器)"},
+    {"q": "AI应用里专门放向量、按相似度找数据,项目用的哪个库?", "relevant": ["doc_vecdb"], "answer": "Qdrant"},
+    {"q": "那个嵌入模型除了中文,还能处理多少种别的语言?", "relevant": ["doc_embedding"], "answer": "100多种语言"},
+    {"q": "靠查外部资料压住模型瞎编,实际效果怎么样?", "relevant": ["doc_rag"], "answer": "降低幻觉,提升事实准确性"},
+    {"q": "法国那座铁塔之城,除了铁塔还能逛哪些地方?", "relevant": ["doc_paris"], "answer": "卢浮宫、凯旋门"},
+    {"q": "做会话状态这种高频小数据读写,放内存里用什么最合适?", "relevant": ["doc_redis"], "answer": "Redis"},
+    {"q": "要保证多笔数据库操作要么全成要么全不算,靠什么能力?", "relevant": ["doc_mysql"], "answer": "事务(InnoDB支持ACID)"},
+    {"q": "文件想从浏览器不经过中转服务器直接送到云上,这叫什么能力?", "relevant": ["doc_oss"], "answer": "HTTPS直传"},
+    {"q": "想让每一条LLM调用都有迹可循、方便排查问题,用什么平台?", "relevant": ["doc_langfuse"], "answer": "Langfuse(追踪全链路trace)"},
+    {"q": "浅草寺所在的城市,还有哪些地标可以逛?", "relevant": ["doc_tokyo"], "answer": "涩谷十字路口、东京塔"},
+    {"q": "日本料理里拿醋拌出来的那种饭叫什么?", "relevant": ["doc_sushi"], "answer": "醋饭"},
+    {"q": "开发的应用想连同运行环境一起封箱带走,靠什么?", "relevant": ["doc_docker"], "answer": "Docker(镜像打包,容器隔离运行)"},
+    {"q": "现在写Python服务,类型标注除了提示还能拿来干什么?", "relevant": ["doc_fastapi"], "answer": "FastAPI基于类型标注构建Web框架"},
+    {"q": "标准库logging输出的字符串不好按字段检索,换哪个库?", "relevant": ["doc_structlog"], "answer": "structlog(键值对结构化输出)"},
+    {"q": "有一座城市既有闻名的湖,又有运河穿过,还有互联网大厂总部,是哪?", "relevant": ["doc_hangzhou"], "answer": "杭州"},
+    {"q": "电车没电不去充电桩,几分钟能换电继续走的是哪家的车?", "relevant": ["doc_nio"], "answer": "蔚来(换电站补能)"},
+    {"q": "咱们太阳系所在的星系,里头大概有多少颗恒星?", "relevant": ["doc_milkyway"], "answer": "1000亿到4000亿颗"},
+    {"q": "国宝除了吃竹子,还爱待在什么样的环境里?", "relevant": ["doc_panda"], "answer": "高山竹林(四川、陕西、甘肃)"},
+    {"q": "去北京旅游,中轴线上那片最大的古建筑群是什么?", "relevant": ["doc_forbidden_city"], "answer": "故宫(紫禁城)"},
+    # --- v4新增: 跨簇联动问(8问) ---
+    {"q": "向量库、对象存储、关系库,这个项目各选了什么?", "relevant": ["doc_vecdb", "doc_oss", "doc_mysql"], "answer": "Qdrant;阿里云OSS;MySQL"},
+    {"q": "分词、结构化日志、异步任务队列三件套分别用什么?", "relevant": ["doc_jieba", "doc_structlog", "doc_celery"], "answer": "jieba;structlog;Celery"},
+    {"q": "嵌入模型和精排模型,项目分别用的什么?", "relevant": ["doc_embedding", "doc_retrieval"], "answer": "BGE-M3;BGE-Reranker"},
+    {"q": "扛事务和扛缓存,MySQL和Redis怎么分工?", "relevant": ["doc_mysql", "doc_redis"], "answer": "事务靠MySQL(InnoDB);缓存靠Redis"},
+    {"q": "容器化方案和大模型观测平台,项目分别选了什么?", "relevant": ["doc_docker", "doc_langfuse"], "answer": "Docker;Langfuse"},
+    {"q": "巴黎和伦敦都是欧洲名城,哪座城市有埃菲尔铁塔?", "relevant": ["doc_paris"], "answer": "巴黎"},  # london干扰
+    {"q": "分词器和向量数据库,项目里分别选了什么方案?", "relevant": ["doc_jieba", "doc_vecdb"], "answer": "jieba;Qdrant"},
+    {"q": "缓存、对象存储、观测平台,这个项目分别用了什么?", "relevant": ["doc_redis", "doc_oss", "doc_langfuse"], "answer": "Redis;阿里云OSS;Langfuse"},
+    # --- v4新增: 关键词型(10问, 尾8问含ASCII精确token — 保持'尾部=关键词型'的清单不变式) ---
+    {"q": "银河系的直径大约是多少光年?", "relevant": ["doc_milkyway"], "answer": "约10万光年"},
+    {"q": "RAG的全称是什么?", "relevant": ["doc_rag"], "answer": "Retrieval-Augmented Generation(检索增强生成)"},
+    {"q": "CRAG是什么的缩写?", "relevant": ["doc_arch"], "answer": "纠正式检索增强生成(Corrective RAG)"},
+    {"q": "BGE-M3支持多少种语言?", "relevant": ["doc_embedding"], "answer": "100多种"},
+    {"q": "蔚来ET5和ES6用什么模式补能?", "relevant": ["doc_nio"], "answer": "换电站"},
+    {"q": "Celery的broker可以配RabbitMQ吗?", "relevant": ["doc_celery"], "answer": "可以(Redis或RabbitMQ)"},
+    {"q": "InnoDB是哪个数据库的存储引擎?", "relevant": ["doc_mysql"], "answer": "MySQL"},
+    {"q": "阿里云OSS的Bucket用来存放什么?", "relevant": ["doc_oss"], "answer": "图片、文档等非结构化文件"},
+    {"q": "FastAPI自动生成的接口文档是什么格式?", "relevant": ["doc_fastapi"], "answer": "OpenAPI"},
+    {"q": "Langfuse支持哪种部署方式?", "relevant": ["doc_langfuse"], "answer": "自托管部署"},
 ]
 
 # v3新增: 不可答负样本(语料完全不含答案; 部分含干扰项检索噪声如tesla/gpt/k8s)
@@ -160,4 +204,13 @@ UNANSWERABLE = [
     "pgvector和Qdrant相比哪个更适合生产?",
     "DeepRAG当前的最新版本号是多少?",
     "Kubernetes的Node亲和性规则怎么配置?",
+    # --- v4新增(8问, 部分含真实世界陷阱: 语料只描述单边事实, 不含比较/价格/供应商等答案) ---
+    "DeepRAG支持私有化部署吗?报价多少?",
+    "阿里云OSS和腾讯COS哪个更便宜?",
+    "Qwen3-Reranker和BGE-Reranker哪个效果更好?",
+    "蔚来的电池是哪家供应商提供的?",
+    "故宫门票一张多少钱?",
+    "寿司和拉面哪个热量更高?",
+    "MySQL 9.0有什么新特性?",
+    "部署DeepRAG需要多少GPU显存?",
 ]
