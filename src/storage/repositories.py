@@ -298,9 +298,15 @@ class ConversationRepository:
             "INSERT INTO conversation_messages (conversation_id, user_id, role, content) VALUES (%s,%s,%s,%s)",
             conversation_id, user_id, role, content)
 
-    async def load_history(self, conversation_id: str) -> list[ConversationMessage]:
-        rows = await self._m.fetch(
-            "SELECT role, content FROM conversation_messages WHERE conversation_id=%s ORDER BY id", conversation_id)
+    async def load_history(self, conversation_id: str, user_id: str | None = None) -> list[ConversationMessage]:
+        """P3: 传user_id则按归属过滤(防复用他人conversation_id读历史注入prompt)."""
+        sql = "SELECT role, content FROM conversation_messages WHERE conversation_id=%s"
+        args: tuple = (conversation_id,)
+        if user_id is not None:
+            sql += " AND user_id=%s"
+            args = (*args, user_id)
+        sql += " ORDER BY id"
+        rows = await self._m.fetch(sql, *args)
         return [ConversationMessage(conversation_id=conversation_id, role=r["role"], content=r["content"]) for r in rows]
 
     async def list_conversations(self, user_id: str) -> list[ConversationSummary]:

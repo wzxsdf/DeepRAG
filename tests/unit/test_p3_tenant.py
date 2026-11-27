@@ -127,6 +127,19 @@ async def test_doc_list_filters_inaccessible_private_kb():
     assert "user_a" in m.calls[0][2]
 
 
+@pytest.mark.asyncio
+async def test_load_history_filters_by_user():
+    from src.storage.repositories import ConversationRepository
+
+    m = FakeMySQL(rows=[])
+    await ConversationRepository(m).load_history("conv1", user_id="user_a")
+    sql = m.calls[0][1]
+    assert "user_id=%s" in sql, "历史读取必须按归属过滤(防复用他人conversation_id读历史)"
+    assert "user_a" in m.calls[0][2]
+    await ConversationRepository(m).load_history("conv1")  # 旧口径(评测脚本)不受影响
+    assert "user_id=" not in m.calls[1][1]
+
+
 # ---------- 4. 强制鉴权: 无token→401(不再有"default"用户兜底) ----------
 
 

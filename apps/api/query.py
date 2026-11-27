@@ -23,9 +23,10 @@ async def _ensure_kbs_readable(kb_ids: list[str] | None, user_id: str, mysql: My
         ensure_kb_readable(await KBRepository(mysql).get(kb_id), user_id)
 
 
-async def _load_history(mysql, conv_id):
+async def _load_history(mysql, conv_id, user_id: str | None = None):
     # ponytail: 取原始消息→重组为[{question,answer}]对(供CRAG多轮理解指代). 建表已由lifespan ensure_schema
-    msgs = await ConversationRepository(mysql).load_history(conv_id)
+    # P3: user_id按归属过滤 — 复用他人conversation_id不再能读其历史(防越权注入prompt)
+    msgs = await ConversationRepository(mysql).load_history(conv_id, user_id=user_id)
     history, last_user = [], None
     for m in msgs:
         if m.role == "user":
@@ -135,7 +136,7 @@ async def query(req: QueryRequest, user: dict = Depends(get_current_user),
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = user["user_id"]
     tenant_id = user["tenant_id"]
-    history = await _manage_history(memory_manager, await _load_history(mysql, conv_id))
+    history = await _manage_history(memory_manager, await _load_history(mysql, conv_id, user_id))
     await _ensure_kbs_readable(req.kb_ids, user_id, mysql)
 
     # ponytail: 缓存检查 - 先尝试从缓存获取结果(仅非多轮的首问走缓存, 多轮带conversation_id不缓存)
@@ -202,7 +203,7 @@ async def query_stream(req: QueryRequest, user: dict = Depends(get_current_user)
     conv_id = req.conversation_id or str(uuid.uuid4())
     user_id = user["user_id"]
     tenant_id = user["tenant_id"]
-    history = await _manage_history(memory_manager, await _load_history(mysql, conv_id))
+    history = await _manage_history(memory_manager, await _load_history(mysql, conv_id, user_id))
     await _ensure_kbs_readable(req.kb_ids, user_id, mysql)
     cfg = {"configurable": {"thread_id": conv_id}}  # ponytail: P0 checkpoint修复 — 复用conversation_id
 
