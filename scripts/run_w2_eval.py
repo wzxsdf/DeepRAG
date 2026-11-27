@@ -98,6 +98,18 @@ async def main(only: str = "all", resumable: bool = False, max_q: str | None = N
         n_docs = await ingest_eval_set(writer)
         print(f"评测集合 {writer.collection_name}: 入库 {n_docs} chunks\n")
 
+        # 窗口指纹(20261127): SiliconFlow rerank分数跨时间窗系统性漂移(同对20:23窗口0.9+/凌晨窗口0.1x),
+        # 固定参考对打分入档, 使跨窗口trial可解释/可比
+        from src.retrieval.embedder import embed_query as _eq
+        from src.retrieval.reranker import rerank as _rerank
+        from src.storage.protocol import RetrievedDocument as _RD
+        _ref = _RD(chunk_id="ref", document_id="ref_doc", version_id="v", parent_id=None,
+                   content="jieba是Python中文分词库,基于前缀词典与动态规划实现精确模式切分,支持自定义词典。",
+                   locator={}, score=0.0, retrieval_source="dense")
+        _rr = await _rerank("中文分词在项目里用的什么库?", [_ref], top_n=1)
+        _fp = _rr[0].score
+        print(f"窗口指纹: 参考对rerank分数={_fp:.3f} (<0.5提示当前窗口rerank行为异常, 跨窗trial需标注)\n")
+
         if only in ("all", "retrieval"):
             for cfg, label in CONFIGS:
                 m = await eval_retrieval(cfg, writer)
