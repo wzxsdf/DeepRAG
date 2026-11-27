@@ -1,6 +1,15 @@
 [project]
 name = "deeprag"
 version = "0.1.0"
+description = "Agentic RAG (Corrective RAG) Q&A system on LangGraph: hybrid retrieval (BGE-M3+BM25/RRF) + Cross-Encoder rerank + multi-tenant JWT + resumable eval harness / 基于 LangGraph 的 CRAG 智能问答系统"
+keywords = ["rag", "agentic-rag", "crag", "corrective-rag", "retrieval-augmented-generation",
+  "langgraph", "qdrant", "bge-m3", "hybrid-search", "rerank", "llm", "knowledge-base", "fastapi"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Text Processing :: Indexing",
+]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
