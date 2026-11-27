@@ -7,6 +7,7 @@ from src.prompts.crag import (
     GENERATOR_PROMPT,
     VERIFIER_PROMPT,
     REWRITE_PROMPT,
+    QUERY_PRE_REWRITE_PROMPT,
 )
 
 # Agent提示词
@@ -30,6 +31,7 @@ __all__ = [
     "GENERATOR_PROMPT",
     "VERIFIER_PROMPT",
     "REWRITE_PROMPT",
+    "QUERY_PRE_REWRITE_PROMPT",
     # Agent
     "TOOL_AGENT_PROMPT",
     "PLAN_PROMPT",

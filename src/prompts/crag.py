@@ -64,10 +64,22 @@ REWRITE_PROMPT = """你是检索查询改写器。上一轮检索没有找到足
 3. 只输出改写后的查询, 不要解释"""
 
 
+QUERY_PRE_REWRITE_PROMPT = """你是检索查询改写器。把下面的问题改写为适合知识库检索的查询(检索前执行, 提高首轮召回)。
+
+问题: {question}{history}
+改写要求:
+1. 口语/白话转关键词化表达: 提取核心概念, 保留并还原专有名词、术语、产品名的正式写法
+2. 消除代词与指代(结合对话历史), 展开缩写口语(如"咋配"→"配置方法")
+3. 不要回答问题, 不要扩写背景知识, 只改写表述
+4. 若问题本身已是检索友好的关键词化表达, 原样输出
+只输出改写后的查询(一行), 不要解释。"""
+
+
 __all__ = [
     "GRADER_PROMPT",
     "GRADER_BATCH_PROMPT",
     "GENERATOR_PROMPT",
     "VERIFIER_PROMPT",
     "REWRITE_PROMPT",
+    "QUERY_PRE_REWRITE_PROMPT",
 ]

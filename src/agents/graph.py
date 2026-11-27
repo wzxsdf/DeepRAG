@@ -10,7 +10,7 @@ from src.agents.routing import classify_chitchat, safety_prefilter
 from src.agents.llm import chat, chat_json, chat_stream
 from src.core.config import get_settings
 from src.prompts import (GRADER_BATCH_PROMPT, GENERATOR_PROMPT, VERIFIER_PROMPT, REWRITE_PROMPT,
-    CHITCHAT_PROMPT, AGENT_COMPLEX_JUDGE_PROMPT)
+    QUERY_PRE_REWRITE_PROMPT, CHITCHAT_PROMPT, AGENT_COMPLEX_JUDGE_PROMPT)
 from src.storage.protocol import RetrievedDocument
 from src.core.logging import log
 
@@ -146,7 +146,7 @@ def _make_entry_node(memory_store=None, fact_store=None, context_max_chars: int 
         # ③ 按 mode 分发
         if mode == "kb":
             return Command(update={"mode": mode, "safety": "allow",
-                                   "user_id": user_id, "memory_context": memory_context}, goto="retrieve")
+                                   "user_id": user_id, "memory_context": memory_context}, goto="pre_rewrite")
         if mode == "agent":
             if await _judge_complex(question):
                 return Command(update={"mode": mode, "safety": "allow",
@@ -157,6 +157,29 @@ def _make_entry_node(memory_store=None, fact_store=None, context_max_chars: int 
         return Command(update={"mode": mode, "safety": "allow",
                                "user_id": user_id, "memory_context": memory_context}, goto="tool_agent")
     return _entry_node
+
+
+async def _pre_rewrite_node(state: AgentState) -> dict:
+    """kb模式检索前query预改写(20261127, golden v3量化缺口): 口语化问题(62问中12问)首轮检索
+    召回不到score>0.30的证据→被拒答阈值误降级, 根因是口语表达与文档关键词化表述不匹配。
+    检索前先改写为检索友好表达(口语→关键词化+指代消解); 失败兜底原问题不阻塞。仅首轮执行,
+    重试路径的改写仍由rewrite节点负责(带失败原因的纠错式改写, 职责不同)。"""
+    if not get_settings().retrieval_query_rewrite:
+        return {}
+    history = state.get("conversation_history") or []
+    hist_text = "\n".join(f"Q: {h.get('question', '')}\nA: {h.get('answer', '')}" for h in history)
+    prompt = QUERY_PRE_REWRITE_PROMPT.format(
+        question=state["question"],
+        history=f"\n对话历史(供指代消解):\n{hist_text}\n" if hist_text else "",
+    )
+    try:
+        new_q = (await chat([{"role": "user", "content": prompt}])).strip()
+    except Exception as e:
+        log.warning("pre_rewrite_failed", error=type(e).__name__, msg=str(e))
+        return {}
+    if not new_q:
+        return {}
+    return {"query": " ".join(new_q.split())}  # 单行化(防LLM输出多行)
 
 
 def _retrieve_node(retriever):
@@ -326,6 +349,7 @@ def build_graph(retriever, memory_store=None, fact_store=None, context_max_chars
     wf.add_node("reply_direct", _timed("reply_direct")(_reply_direct_node))
     wf.add_node("tool_agent", _timed("tool_agent")(_tool_agent_node(retriever)))
     wf.add_node("plan_agent", _timed("plan_agent")(_plan_agent_node(retriever)))
+    wf.add_node("pre_rewrite", _timed("pre_rewrite")(_pre_rewrite_node))
     wf.add_node("retrieve", _timed("retrieve")(_retrieve_node(retriever)))
     wf.add_node("grade", _timed("grade")(_grade_node))
     wf.add_node("rewrite", _timed("rewrite")(_rewrite_node))
@@ -336,6 +360,7 @@ def build_graph(retriever, memory_store=None, fact_store=None, context_max_chars
     wf.add_edge("reply_direct", END)
     wf.add_edge("tool_agent", END)
     wf.add_edge("plan_agent", END)
+    wf.add_edge("pre_rewrite", "retrieve")  # kb模式: 预改写→检索(关闭开关时节点直通不改query)
     wf.add_edge("retrieve", "grade")
     # ponytail: LangGraph 1.x Command声明式路由 — grade/verify节点内return Command(goto=...),
     # 替代旧 add_conditional_edges + 独立decide函数, 路由逻辑内聚到节点, 更简洁现代

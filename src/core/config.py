@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     # 默认0.15: 生产≈dense(实证最优), 稀疏路保留应对真实长文档语料; 0=纯dense。
     retrieval_sparse_weight: float = 0.15
 
+    # --- kb模式检索前query预改写(20261127, golden v3量化缺口) ---
+    # 口语化问题(62问中12问)首轮检索无法以score>0.30召回证据→被拒答阈值误降级; 根因是口语表达
+    # 与文档关键词化表述(术语/专名)向量不匹配。kb模式检索前先经fast模型改写为检索友好表达
+    # (口语→关键词化+指代消解), 成本1次fast调用(~1s)。False=关闭(旧行为)。
+    retrieval_query_rewrite: bool = True
+
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)
     memory_max_context_tokens: int = 2000    # 历史占用token预算; 超过才触发摘要+窗口
