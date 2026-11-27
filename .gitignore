@@ -80,3 +80,6 @@ dmypy.json
 # 本地上传/测试中间文件
 uploads/
 /test_doc.pdf
+
+# 本地模型权重(ONNX/PyTorch, 体积大不入库; 下载: scripts/export_reranker_onnx.py 注释)
+models/

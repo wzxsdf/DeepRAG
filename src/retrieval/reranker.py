@@ -41,11 +41,24 @@ def deduplicate_documents(docs: List[RetrievedDocument]) -> List[RetrievedDocume
 
 async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> List[RetrievedDocument]:
     """Cross-Encoder精排. 先按parent去重，失败时回退去重后的原序.
+    后端可配(rerank_backend): api=SiliconFlow(默认) / local_onnx=本地int8量化(确定性无漂移).
     ponytail: 端点偶发"全零退化响应"(20261126晚间实测: 明显相关文档对返回0.0分, 干扰正常问答) —
-    全低分(<0.05)时重试一次取更优, 退化可自愈; 真不相关(不可答问题)重试后仍低分, 行为不变."""
+    全低分(<selfheal_min)时重试一次取更优, 退化可自愈; 真不相关(不可答问题)重试后仍低分, 行为不变."""
+    from src.core.config import get_settings
+
     docs = deduplicate_documents(docs)
     if not docs:
         return docs
+
+    if get_settings().rerank_backend == "local_onnx":
+        # 本地后端: 无网络退化问题, 自愈重试无意义(确定性), 失败仍回退原序不阻塞
+        from src.retrieval.local_reranker import rerank_local
+
+        try:
+            return await rerank_local(query, docs, top_n)
+        except Exception as e:
+            log.warning("local_rerank 回退原序", error=type(e).__name__, msg=str(e))
+            return docs[:top_n]
 
     async def _call() -> List[RetrievedDocument]:
         payload = {

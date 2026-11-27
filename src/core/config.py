@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     # 自愈重试触发线(原硬编码0.30, 与bge-v2-m3分数分布标定; 换模型后随retrieval_min_score一起重标)
     rerank_selfheal_min: float = 0.30
+    # 精排后端(20261127 P0): api=SiliconFlow /rerank(默认, 零依赖) | local_onnx=本地int8量化
+    # (确定性无跨窗漂移; 需 optional-deps[local-rerank] + scripts/export_reranker_onnx.py 导出权重)
+    rerank_backend: str = "api"
 
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)

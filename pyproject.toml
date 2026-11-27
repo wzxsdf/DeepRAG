@@ -46,6 +46,12 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.13.0",
 ]
+# 本地reranker(P0可靠性终局, 确定性无跨窗漂移): 权重导出+推理
+# 导出另需 torch(CPU版): pip install torch --index-url https://download.pytorch.org/whl/cpu
+local-rerank = [
+    "onnxruntime>=1.20.0",
+    "transformers>=4.45",
+]
 
 [build-system]
 requires = ["hatchling"]
