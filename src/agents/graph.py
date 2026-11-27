@@ -6,7 +6,7 @@ from typing import TypedDict, List, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Command
 
-from src.agents.routing import classify_chitchat, safety_prefilter
+from src.agents.routing import classify_chitchat, needs_query_rewrite, safety_prefilter
 from src.agents.llm import chat, chat_json, chat_stream
 from src.core.config import get_settings
 from src.prompts import (GRADER_BATCH_PROMPT, GENERATOR_PROMPT, VERIFIER_PROMPT, REWRITE_PROMPT,
@@ -166,7 +166,11 @@ async def _pre_rewrite_node(state: AgentState) -> dict:
     重试路径的改写仍由rewrite节点负责(带失败原因的纠错式改写, 职责不同)。"""
     if not get_settings().retrieval_query_rewrite:
         return {}
+    # P1门控: 口语标记/多轮指代才改写, 关键词式(ASCII精确token)直通跳过 — 省一次LLM调用(~2s)
     history = state.get("conversation_history") or []
+    if get_settings().retrieval_query_rewrite_gate and not needs_query_rewrite(
+            state["question"], has_history=bool(history)):
+        return {}
     hist_text = "\n".join(f"Q: {h.get('question', '')}\nA: {h.get('answer', '')}" for h in history)
     prompt = QUERY_PRE_REWRITE_PROMPT.format(
         question=state["question"],

@@ -122,12 +122,24 @@ class Settings(BaseSettings):
     # 与文档关键词化表述(术语/专名)向量不匹配。kb模式检索前先经fast模型改写为检索友好表达
     # (口语→关键词化+指代消解), 成本1次fast调用(~1s)。False=关闭(旧行为)。
     retrieval_query_rewrite: bool = True
+    # 门控(P1延迟回收): 口语标记/多轮指代才改写, 关键词式(含ASCII精确token)直通跳过。
+    # 离线验证golden v4: 跳过23/100且全部为关键词式问(golden上口语问已占多数, 生产kb查询
+    # 关键词式占比更高→省得更多)。False=每问都改写(20261127治疗组口径)。
+    retrieval_query_rewrite_gate: bool = True
 
     # --- LLM请求超时(20261127) ---
     # 单次LLM HTTP调用的硬超时(秒): openai SDK默认600s且chat_json有3套兜底方案×max_retries,
     # 端点黑洞(无RST的挂起连接)时单问可挂~30min(20261127实测评测卡死13min+)。120s兜底足够
     # 覆盖正常调用(flash模型p99<30s), 超时走异常路径(自愈重试/评测可疑计数)。
     chat_request_timeout: int = 120
+
+    # --- rerank模型(20261127, P0精排优化A/B) ---
+    # SiliconFlow同端点可换: BAAI/bge-reranker-v2-m3(现役) / Qwen/Qwen3-Reranker-0.6B|4B|8B /
+    # Pro/BAAI/bge-reranker-v2-m3(独享档, 漂移稳定性待查)。分数分布随模型变 — 换模型必须
+    # 重标定 retrieval_min_score 与 rerank_selfheal_min(标定脚本: scripts/calibrate_rerank.py)。
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # 自愈重试触发线(原硬编码0.30, 与bge-v2-m3分数分布标定; 换模型后随retrieval_min_score一起重标)
+    rerank_selfheal_min: float = 0.30
 
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)

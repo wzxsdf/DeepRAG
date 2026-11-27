@@ -12,8 +12,18 @@ load_dotenv()
 
 _RERANK_URL = os.getenv("EMBEDDING_BASE_URL", "") + "/rerank"
 _RERANK_HEADERS = {"Authorization": f"Bearer {os.getenv('EMBEDDING_API_KEY', '')}"}
-_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 DEFAULT_RETRIEVAL_CANDIDATES = 20
+
+
+def _rerank_model() -> str:
+    """P0 A/B: 模型可配(env RERANK_MODEL), 分数分布随模型变 — 换模型必须重标定阈值(见config注释)."""
+    from src.core.config import get_settings
+    return get_settings().rerank_model
+
+
+def _selfheal_min() -> float:
+    from src.core.config import get_settings
+    return get_settings().rerank_selfheal_min
 
 
 def deduplicate_documents(docs: List[RetrievedDocument]) -> List[RetrievedDocument]:
@@ -39,7 +49,7 @@ async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> L
 
     async def _call() -> List[RetrievedDocument]:
         payload = {
-            "model": _RERANK_MODEL,
+            "model": _rerank_model(),
             "query": query,
             "documents": [d.content for d in docs],
             "top_n": min(top_n, len(docs)),
@@ -59,9 +69,11 @@ async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> L
     try:
         ranked = await _call()
         top1 = max((d.score for d in ranked), default=0.0)
-        # ponytail: 触发线0.30与grade阈值同线 — 退化响应实测跨0~0.2分段(20261127凌晨: 纯零重试后
-        # 仍出现0.1x分段退化, 漏过旧触发线0.05, 致~10问被阈值误杀短路), <0.30的可疑全低分都重试一次
-        if ranked and top1 < 0.30:
+        # ponytail: 触发线与grade阈值同线标定(可配rerank_selfheal_min) — 退化响应实测跨0~0.2分段
+        # (20261127凌晨: 纯零重试后仍出现0.1x分段退化, 漏过旧触发线0.05, 致~10问被阈值误杀短路),
+        # <触发线的可疑全低分都重试一次
+        selfheal = _selfheal_min()
+        if ranked and top1 < selfheal:
             log.warning("rerank_suspicious_low_retry", top1=round(top1, 4), n=len(ranked))
             retry = await _call()
             retry_top1 = max((d.score for d in retry), default=0.0)

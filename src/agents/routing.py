@@ -34,6 +34,31 @@ _HARM_RE = re.compile(
 # 请求动词: 与危害对象共现才判定为恶意请求(疑问式"如何/怎么"不入表, 交模型护栏)
 _REQUEST_RE = re.compile(r"帮我?|写一?[个下]|生成|编写|制作|提供|给出|实施|发起|进行")
 
+# P1门控(20261127): 检索前query预改写的启发式触发 — 口语化问题才值得花1次LLM改写(~2s),
+# 关键词式问题(含ASCII精确token)本就检索友好, 跳过改写回收延迟。
+# 口径: 口语标记命中→改写(高recall; 漏改写的代价=召回不足, 误改写的代价仅+2s延迟);
+#       无标记但含ASCII token→跳过(已是精确检索词); 其余纯中文模糊问→默认改写(宁多勿漏)。
+_COLLO_RE = re.compile(
+    r"那个|那套|那种|那座|那片|那家|这家|这(个|种|类|套)"
+    r"|啥|咋|来着|想知道|选谁|用谁|拿什么|靠什么|怎么办|怎么着|怎么弄|怎么搞|怎么用"
+    r"|哪(个|道|家|座|款|家)|咱们|胡说八道|瞎编|有迹可循|排座次|封箱带走"
+)
+_ASCII_TOKEN_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def needs_query_rewrite(question: str, has_history: bool = False) -> bool:
+    """检索前query预改写门控: True=值得花一次LLM改写(口语化/多轮指代), False=关键词式直通."""
+    q = question.strip()
+    if not q:
+        return False
+    if _COLLO_RE.search(q):
+        return True
+    if has_history:
+        return True  # 多轮带指代("它/这个库"), 需改写消解
+    if _ASCII_TOKEN_RE.search(q):
+        return False
+    return True
+
 
 def classify_chitchat(question: str) -> str | None:
     """规则快通道: 整句命中明显闲聊/能力问询→'direct'(跳过LLM); 未命中→None(走mode分发)."""
