@@ -32,3 +32,13 @@
 > **后续候选(roadmap)**: 双模型集成 — Qwen排序(检索增益) + bge分数做拒答门控(负样本近零分可靠),
 > 代价每问+1次rerank API(~2s); 本地ONNX后端已就绪(rerank_backend=local_onnx, 20对/752ms, 无漂移)。
 > 标定探针数据: scripts/calibrate_rerank.py + docs/trials/ 三模型分布见 baseline 同期记录。
+
+---
+
+## golden v5 多轮评测(20261129, 架构盲区补齐)
+
+> v5 = v4的100问 + **20个多轮问**(带history, follow-up含指代) = 120问。生产/query多为多轮, 而v4全单轮 —
+> history治理→预改写指代消解→检索→多轮grade链路首次被端到端量化(trial `20261129_053117`):
+> **judge_answer 0.950**(优于单轮均值0.894) / R@1 0.850(缺口3个=开放型follow-up, 同一精排弱轴) /
+> p50 9.9s / 不可答重验18/18满格。多轮质量基线就此建立, 后续记忆A/B(v5数据可判污染vs增益)有了对照面。
+> 架构优化同期落地: LLMClient依赖注入(graph节点可换LLM实现) / DB二级索引补齐(幂等DDL) / request_id贯穿。
