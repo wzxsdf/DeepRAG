@@ -143,6 +143,11 @@ class Settings(BaseSettings):
     # 精排后端(20261127 P0): api=SiliconFlow /rerank(默认, 零依赖) | local_onnx=本地int8量化
     # (确定性无跨窗漂移; 需 optional-deps[local-rerank] + scripts/export_reranker_onnx.py 导出权重)
     rerank_backend: str = "api"
+    # 双模型集成(20261129, P0 A/B定论的后续): 排序权交给rerank_model(如Qwen4B, 检索增益),
+    # 拒答门控交给refuser模型对同批top-N重打分并覆写score(bge负样本近零分=安全资产, A/B实测
+    # Qwen单飞会击穿拒答防线18/18→17/18)。True=启用, 代价每问+1次rerank API(~1-3s)。
+    rerank_ensemble_refuser: bool = False
+    rerank_refuser_model: str = "BAAI/bge-reranker-v2-m3"
 
     # --- 短期记忆治理(P0, 即插即用) ---
     memory_enabled: bool = True              # 总开关; False=组件直通(不裁剪不摘要, 兼容旧行为)

@@ -60,27 +60,52 @@ async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> L
             log.warning("local_rerank 回退原序", error=type(e).__name__, msg=str(e))
             return docs[:top_n]
 
-    async def _call() -> List[RetrievedDocument]:
-        payload = {
-            "model": _rerank_model(),
-            "query": query,
-            "documents": [d.content for d in docs],
-            "top_n": min(top_n, len(docs)),
-            "return_documents": False,
-        }
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.post(_RERANK_URL, headers=_RERANK_HEADERS, json=payload)
-        r.raise_for_status()
-        ranked = []
-        for item in r.json().get("results", []):
-            doc = docs[item["index"]]
-            doc.score = item["relevance_score"]
-            doc.retrieval_source = "rerank"
-            ranked.append(doc)
-        return ranked
+    def _make_call(model: str):
+        async def _call() -> List[RetrievedDocument]:
+            payload = {
+                "model": model,
+                "query": query,
+                "documents": [d.content for d in docs],
+                "top_n": min(top_n, len(docs)),
+                "return_documents": False,
+            }
+            async with httpx.AsyncClient(timeout=60) as c:
+                r = await c.post(_RERANK_URL, headers=_RERANK_HEADERS, json=payload)
+            r.raise_for_status()
+            ranked = []
+            for item in r.json().get("results", []):
+                doc = docs[item["index"]]
+                doc.score = item["relevance_score"]
+                doc.retrieval_source = "rerank"
+                ranked.append(doc)
+            return ranked
+        return _call
+
+    async def _apply_refuser_scores(ranked: List[RetrievedDocument]) -> bool:
+        """双模型集成: refuser模型(bge)对同批top-N重打分并覆写score — 排序权留给排序模型,
+        拒答门控回到bge分数分布(grade阈值0.30语义不变). 失败返回False(保留排序分, 降级为单模型).
+        注意: 两个模型的排序可能不同, 必须按chunk_id映射覆写, 不能按位置zip."""
+        try:
+            rescored = await _make_call(get_settings().rerank_refuser_model)()
+            if len(rescored) != len(ranked):
+                raise ValueError(f"refuser返回数不齐: {len(rescored)} vs {len(ranked)}")
+            score_by_id = {d.chunk_id: d.score for d in rescored}
+            missing = 0
+            for doc in ranked:
+                if doc.chunk_id in score_by_id:
+                    doc.score = score_by_id[doc.chunk_id]
+                    doc.retrieval_source = "rerank_ensemble"
+                else:
+                    missing += 1
+            if missing:
+                raise ValueError(f"refuser未覆盖{missing}个chunk")
+            return True
+        except Exception as e:
+            log.warning("rerank_ensemble_refuser_failed", error=type(e).__name__, msg=str(e))
+            return False
 
     try:
-        ranked = await _call()
+        ranked = await _make_call(_rerank_model())()
         top1 = max((d.score for d in ranked), default=0.0)
         # ponytail: 触发线与grade阈值同线标定(可配rerank_selfheal_min) — 退化响应实测跨0~0.2分段
         # (20261127凌晨: 纯零重试后仍出现0.1x分段退化, 漏过旧触发线0.05, 致~10问被阈值误杀短路),
@@ -88,10 +113,12 @@ async def rerank(query: str, docs: List[RetrievedDocument], top_n: int = 5) -> L
         selfheal = _selfheal_min()
         if ranked and top1 < selfheal:
             log.warning("rerank_suspicious_low_retry", top1=round(top1, 4), n=len(ranked))
-            retry = await _call()
+            retry = await _make_call(_rerank_model())()
             retry_top1 = max((d.score for d in retry), default=0.0)
             if retry_top1 > top1:
                 ranked = retry
+        if ranked and get_settings().rerank_ensemble_refuser:
+            await _apply_refuser_scores(ranked)
         return ranked
     except Exception as e:
         # ponytail: rerank失败不阻塞主流程, 回退原序(已融合的RRF序)裁剪top_n
