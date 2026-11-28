@@ -62,6 +62,18 @@ app = FastAPI(
 app.add_middleware(CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
     allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def request_id_middleware(request, call_next):
+    """架构优化④: 每请求生成request_id(structlog contextvars贯穿所有节点日志) + X-Request-Id回传."""
+    from src.core.logging import new_request_id
+    rid = new_request_id()
+    response = await call_next(request)
+    response.headers["X-Request-Id"] = rid
+    return response
+
+
 app.include_router(auth_router)
 app.include_router(monitor_router)
 app.include_router(conversations_router)
