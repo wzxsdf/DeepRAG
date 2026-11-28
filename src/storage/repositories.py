@@ -14,6 +14,22 @@ from src.domain.models import (
 )
 
 
+async def _ensure_index(mysql: MySQLStore, table: str, index_name: str, cols_sql: str):
+    """幂等建二级索引(架构优化③): MySQL无CREATE INDEX IF NOT EXISTS, SHOW INDEX探测后再建.
+    失败仅告警不阻塞启动(并发启动竞态/权限不足等, 索引缺失只影响性能不影响正确性)."""
+    existing = await mysql.fetch(f"SHOW INDEX FROM {table} WHERE Key_name=%s", index_name)
+    if existing:
+        return
+    try:
+        await mysql.execute(f"CREATE INDEX {index_name} ON {table} ({cols_sql})")
+        from src.core.logging import log
+        log.info("index_created", table=table, index=index_name)
+    except Exception as e:
+        from src.core.logging import log
+        log.warning("index_create_failed", table=table, index=index_name,
+                    error=type(e).__name__, msg=str(e))
+
+
 class UserRepository:
     def __init__(self, mysql: MySQLStore):
         self._m = mysql
@@ -47,6 +63,9 @@ class KBRepository:
         cols = {r["Field"] for r in await self._m.fetch("SHOW COLUMNS FROM knowledge_bases")}
         if "owner_id" not in cols:
             await self._m.execute("ALTER TABLE knowledge_bases ADD COLUMN owner_id VARCHAR(50) NULL")
+        # 架构优化③: 归属过滤/软删过滤列索引(存量库幂等补建)
+        await _ensure_index(self._m, "knowledge_bases", "idx_kb_owner", "owner_id")
+        await _ensure_index(self._m, "knowledge_bases", "idx_kb_deleted", "deleted_at")
 
     async def create(self, id: str, tenant_id: str, name: str, owner_id: str | None = None):
         await self._m.execute("INSERT IGNORE INTO tenants (id, name) VALUES ('default','Default')")
@@ -101,6 +120,14 @@ class KBRepository:
 class DocumentRepository:
     def __init__(self, mysql: MySQLStore):
         self._m = mysql
+
+    async def ensure_schema(self):
+        """架构优化③: documents/document_versions/chunks 查询列幂等补索引
+        (kb_id列表/软删过滤/version回溯/parent回溯; conversation_messages建表已内联索引, 无需此处)."""
+        await _ensure_index(self._m, "documents", "idx_doc_kb", "kb_id")
+        await _ensure_index(self._m, "documents", "idx_doc_deleted", "deleted_at")
+        await _ensure_index(self._m, "document_versions", "idx_dv_document", "document_id")
+        await _ensure_index(self._m, "chunks", "idx_chunk_version", "version_id")
 
     async def create(self, id: str, kb_id: str, title: str):
         await self._m.execute("INSERT IGNORE INTO knowledge_bases (id, tenant_id, name) VALUES ('default','default','Default KB')")

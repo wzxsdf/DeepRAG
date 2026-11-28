@@ -97,3 +97,16 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 二级索引(架构优化③, 20261129): 所有非PK的WHERE/JOIN列全部无索引=全表扫, 数据量增长后线性劣化。
+-- 存量库由 repositories 的 ensure_indexes 幂等补建(SHOW INDEX→CREATE INDEX, MySQL无IF NOT EXISTS);
+-- 本文件供全新部署一次到位。
+CREATE INDEX idx_kb_owner ON knowledge_bases (owner_id);
+CREATE INDEX idx_kb_deleted ON knowledge_bases (deleted_at);
+CREATE INDEX idx_doc_kb ON documents (kb_id);
+CREATE INDEX idx_doc_deleted ON documents (deleted_at);
+CREATE INDEX idx_dv_document ON document_versions (document_id);
+CREATE INDEX idx_chunk_version ON chunks (version_id);
+CREATE INDEX idx_cm_conv_user ON conversation_messages (conversation_id, user_id);
+CREATE INDEX idx_cm_user ON conversation_messages (user_id);
+CREATE INDEX idx_conv_user ON conversations (user_id);
