@@ -32,6 +32,16 @@ async def main(pos_n: int):
     model = get_settings().rerank_model
     print(f"标定模型: {model} | 正样本{pos_n}问(分层抽样) + 负样本{len(UNANSWERABLE)}问(全量)")
 
+    # 窗口指纹预检(与eval同口径): 固定参考对rerank分数, <0.5提示当前窗口行为异常
+    # (20261127实测SiliconFlow跨窗漂移: 同对20:23窗0.9+/凌晨0.1x — 退化窗标定数据不可信)
+    from src.storage.protocol import RetrievedDocument as _RD
+    _ref = _RD(chunk_id="ref", document_id="ref_doc", version_id="v", parent_id=None,
+               content="jieba是Python中文分词库,基于前缀词典与动态规划实现精确模式切分,支持自定义词典。",
+               locator={}, score=0.0, retrieval_source="dense")
+    from src.retrieval.reranker import rerank as _rerank
+    _fp = (await _rerank("中文分词在项目里用的什么库?", [_ref], top_n=1))[0].score
+    print(f"窗口指纹: 参考对rerank分数={_fp:.3f} (<0.5提示窗口异常, 建议换窗口重跑)\n")
+
     writer = create_eval_writer()
     try:
         await ingest_eval_set(writer)
