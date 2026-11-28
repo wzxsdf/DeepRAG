@@ -136,7 +136,7 @@ async def test_grade_threshold_shortcircuit_skips_grader(monkeypatch):
     async def fake_rerank(query, docs, top_n=5):
         return docs
 
-    async def fake_chat(messages):
+    async def fake_chat(messages, temperature=0.0):
         return "改写"
 
     async def fake_chat_stream(messages):
@@ -147,17 +147,17 @@ async def test_grade_threshold_shortcircuit_skips_grader(monkeypatch):
         return {"generation": "常识回答", "source": "fallback_unverified"}
 
     monkeypatch.setattr(RR, "rerank", fake_rerank)
-    monkeypatch.setattr(G, "chat", fake_chat)
-    monkeypatch.setattr(G, "chat_stream", fake_chat_stream)
+    monkeypatch.setattr("src.core.llm.chat", fake_chat)
+    monkeypatch.setattr("src.core.llm.chat_stream", fake_chat_stream)
     monkeypatch.setattr(RA, "run_react_agent", fake_react)
 
     grader_called = []
 
-    async def must_not_call(messages):
+    async def must_not_call(messages, temperature=0.0, schema=None, purpose='fast'):
         grader_called.append(True)
         return {"grades": []}
 
-    monkeypatch.setattr(G, "chat_json", must_not_call)
+    monkeypatch.setattr("src.core.llm.chat_json", must_not_call)
 
     graph = G.build_graph(FakeRetriever())
     state = {"question": "特斯拉Model Y的续航是多少公里?", "query": "特斯拉Model Y的续航是多少公里?",
@@ -190,7 +190,7 @@ async def test_grade_fallback_clears_documents(monkeypatch):
     async def fake_rerank(query, docs, top_n=5):
         return docs
 
-    async def fake_chat(messages):
+    async def fake_chat(messages, temperature=0.0):
         return "改写后的问题"
 
     async def fake_chat_stream(messages):
@@ -202,14 +202,14 @@ async def test_grade_fallback_clears_documents(monkeypatch):
         return {"generation": "ReAct回答", "source": "tool"}
 
     monkeypatch.setattr(RR, "rerank", fake_rerank)
-    monkeypatch.setattr(G, "chat", fake_chat)
-    monkeypatch.setattr(G, "chat_stream", fake_chat_stream)
+    monkeypatch.setattr("src.core.llm.chat", fake_chat)
+    monkeypatch.setattr("src.core.llm.chat_stream", fake_chat_stream)
     monkeypatch.setattr(RA, "run_react_agent", fake_react)
 
-    async def j_irrelevant(messages):
+    async def j_irrelevant(messages, temperature=0.0, schema=None, purpose='fast'):
         return {"grades": [{"index": 1, "relevant": False}]}
 
-    monkeypatch.setattr(G, "chat_json", j_irrelevant)
+    monkeypatch.setattr("src.core.llm.chat_json", j_irrelevant)
 
     graph = G.build_graph(FakeRetriever())
     state = {"question": "知识库里的问题", "query": "知识库里的问题", "tenant_id": "default",
