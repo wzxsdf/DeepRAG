@@ -62,6 +62,61 @@ def test_safety_allows_legit_security_topics(question):
     assert safety_prefilter(question) is None
 
 
+# ---------- P0: 本地ONNX reranker后端开关(api|local_onnx) ----------
+
+
+@pytest.mark.asyncio
+async def test_rerank_backend_local_onnx_dispatch(monkeypatch):
+    """rerank_backend=local_onnx → 委派rerank_local(按local排序返回)."""
+    import src.retrieval.reranker as RR
+    from src.core.config import get_settings
+    from src.storage.protocol import RetrievedDocument
+
+    docs = [RetrievedDocument(chunk_id="c2", document_id="d2", version_id="v", parent_id=None,
+                              content="次序文档", locator={}, score=0.5, retrieval_source="hybrid_rrf"),
+            RetrievedDocument(chunk_id="c1", document_id="d1", version_id="v", parent_id=None,
+                              content="应该排第一的文档", locator={}, score=0.5, retrieval_source="hybrid_rrf")]
+
+    async def fake_local(query, ddocs, top_n=5):
+        assert query == "测试问题"
+        out = [d for d in ddocs if d.chunk_id == "c1"][:top_n]
+        out[0].score = 0.9
+        out[0].retrieval_source = "rerank_local"
+        return out
+
+    monkeypatch.setattr("src.retrieval.local_reranker.rerank_local", fake_local)
+    s = get_settings()
+    monkeypatch.setattr(s, "rerank_backend", "local_onnx")
+
+    out = await RR.rerank("测试问题", docs, top_n=5)
+    assert [d.chunk_id for d in out] == ["c1"], "local_onnx后端必须按local排序返回"
+    assert out[0].retrieval_source == "rerank_local"
+
+
+@pytest.mark.asyncio
+async def test_rerank_backend_local_onnx_failure_falls_back(monkeypatch):
+    """local_onnx后端异常(模型缺失等) → 回退原序不阻塞(与api后端兜底语义一致)."""
+    import src.retrieval.reranker as RR
+    from src.core.config import get_settings
+    from src.storage.protocol import RetrievedDocument
+
+    docs = [RetrievedDocument(chunk_id="c2", document_id="d2", version_id="v", parent_id=None,
+                              content="次序文档", locator={}, score=0.5, retrieval_source="hybrid_rrf"),
+            RetrievedDocument(chunk_id="c1", document_id="d1", version_id="v", parent_id=None,
+                              content="应该排第一的文档", locator={}, score=0.5, retrieval_source="hybrid_rrf")]
+
+    async def broken_local(query, ddocs, top_n=5):
+        raise FileNotFoundError("本地模型未导出")
+
+    monkeypatch.setattr("src.retrieval.local_reranker.rerank_local", broken_local)
+    s = get_settings()
+    monkeypatch.setattr(s, "rerank_backend", "local_onnx")
+
+    out = await RR.rerank("测试问题", docs, top_n=5)
+    assert [d.chunk_id for d in out] == ["c2", "c1"], "失败必须回退去重后的原序"
+    assert all(d.retrieval_source == "hybrid_rrf" for d in out), "回退时不得篡改retrieval_source"
+
+
 # ---------- 3. grade降级清空documents ----------
 
 @pytest.mark.asyncio

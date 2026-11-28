@@ -19,7 +19,7 @@ def main():
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-    assert (MODEL_DIR / "pytorch_model.safetensors").exists(), f"权重未下载: {MODEL_DIR}"
+    assert (MODEL_DIR / "model.safetensors").exists(), f"权重未下载: {MODEL_DIR}"
     tok = AutoTokenizer.from_pretrained(str(MODEL_DIR))
     model = AutoModelForSequenceClassification.from_pretrained(str(MODEL_DIR)).eval()
     print("model loaded:", model.config.architectures, "num_labels =", model.config.num_labels)
@@ -53,14 +53,14 @@ def main():
     import numpy as np
 
     sess = ort.InferenceSession(str(INT8 if INT8.exists() else FP32), providers=["CPUExecutionProvider"])
-    pairs = [(tok("中文分词在项目里用的什么库?", "jieba是Python中文分词库,基于前缀词典与动态规划实现精确模式切分。"),
-              tok("中文分词在项目里用的什么库?", "大熊猫是中国特有珍稀动物,以竹子为主食。"))]
-    for pos, neg in pairs:
-        for name, ins in (("pos", pos), ("neg", neg)):
-            feed = {"input_ids": ins["input_ids"].numpy(), "attention_mask": ins["attention_mask"].numpy()}
-            logit = sess.run(["logits"], feed)[0][0][0]
-            sig = 1.0 / (1.0 + np.exp(-float(logit)))
-            print(f"  {name}: logit={float(logit):.4f} sigmoid={sig:.4f}")
+    pairs = [("中文分词在项目里用的什么库?", "jieba是Python中文分词库,基于前缀词典与动态规划实现精确模式切分。"),
+             ("中文分词在项目里用的什么库?", "大熊猫是中国特有珍稀动物,以竹子为主食。")]
+    for name, (q, d) in (("pos", pairs[0]), ("neg", pairs[1])):
+        ins = tok([q], [d], return_tensors="np")  # transformers5: 单对返回list, 必须显式np
+        feed = {"input_ids": ins["input_ids"].astype(np.int64), "attention_mask": ins["attention_mask"].astype(np.int64)}
+        logit = sess.run(["logits"], feed)[0][0][0]
+        sig = 1.0 / (1.0 + np.exp(-float(logit)))
+        print(f"  {name}: logit={float(logit):.4f} sigmoid={sig:.4f}")
     print("EXPORT_OK")
 
 
