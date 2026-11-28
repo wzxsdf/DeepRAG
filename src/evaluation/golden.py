@@ -1,5 +1,5 @@
 # ponytail: 评估文档集(确定性id) + Golden问题(标注relevant doc ids + 参考答案) + 不可答负样本
-# golden v4(20261127定版): v3的62问原样保留 + 新增38问(20口语改写型+8跨簇+10关键词型) + UNANSWERABLE扩到18问
+# golden v5(20261129定版): v4的100问原样保留 + 新增20个多轮问(带"history"字段) = 120问 + UNANSWERABLE 18问
 # 设计规则:
 #   1. 每个主题文档是自包含短段落, 关键事实落在前150字符内(kb模式证据截断窗口)
 #   2. 干扰项与主题语义近似但不作为任何问题的relevant, 考验 dense 被噪声误导、hybrid/rerank 纠偏
@@ -77,7 +77,7 @@ DISTRACTOR_IDS = frozenset({
 # 主题文档id集合(UNANSWERABLE完整性校验/judge口径用)
 TOPIC_IDS = frozenset(doc_id for doc_id, _ in DOCUMENTS if doc_id not in DISTRACTOR_IDS)
 
-GOLDEN_VERSION = "v4"
+GOLDEN_VERSION = "v5"
 
 GOLDEN = [
     # --- v1的10问原样保留(基线可对比) ---
@@ -188,6 +188,69 @@ GOLDEN = [
     {"q": "阿里云OSS的Bucket用来存放什么?", "relevant": ["doc_oss"], "answer": "图片、文档等非结构化文件"},
     {"q": "FastAPI自动生成的接口文档是什么格式?", "relevant": ["doc_fastapi"], "answer": "OpenAPI"},
     {"q": "Langfuse支持哪种部署方式?", "relevant": ["doc_langfuse"], "answer": "自托管部署"},
+    # --- v5新增: 多轮问(20问, 带"history"字段) — 架构盲区补齐: 生产/query多为多轮, 而golden v4全单轮,
+    # history治理→预改写指代消解→检索→多轮grade链路从未被端到端量化。follow-up全部含指代(它/那座/这个),
+    # 答案须可从主题文档推出; 评测时conversation_history注入graph(预改写门控has_history=True必改写) ---
+    {"q": "那个精排模型属于什么架构?", "history": [
+        {"question": "DeepRAG如何对检索结果做精排?", "answer": "用BGE-Reranker交叉编码器精排"}],
+     "relevant": ["doc_retrieval"], "answer": "交叉编码器(Cross-Encoder)"},
+    {"q": "它支持多少种语言?", "history": [
+        {"question": "那个输出1024维的多语言嵌入模型是什么?", "answer": "BGE-M3"}],
+     "relevant": ["doc_embedding"], "answer": "100多种语言"},
+    {"q": "它原生支持哪些数据结构?", "history": [
+        {"question": "哪个内存数据库既能当缓存又能做排行榜?", "answer": "Redis"}],
+     "relevant": ["doc_redis"], "answer": "字符串、哈希、列表、集合等"},
+    {"q": "它的broker可以配哪些消息代理?", "history": [
+        {"question": "Python后端的异步后台任务用什么组件跑?", "answer": "Celery"}],
+     "relevant": ["doc_celery"], "answer": "Redis或RabbitMQ"},
+    {"q": "它靠哪个存储引擎支持事务与行级锁?", "history": [
+        {"question": "订单库存这种要事务和行级锁的数据放哪类数据库?", "answer": "MySQL(InnoDB)"}],
+     "relevant": ["doc_mysql"], "answer": "InnoDB"},
+    {"q": "它给前端做临时下载的机制叫什么?", "history": [
+        {"question": "用户上传的图片和PDF原文件落在哪个云服务?", "answer": "阿里云OSS"}],
+     "relevant": ["doc_oss"], "answer": "签名URL"},
+    {"q": "这个平台支持哪种部署方式?", "history": [
+        {"question": "排查一次问答全链路调用用什么观测平台?", "answer": "Langfuse"}],
+     "relevant": ["doc_langfuse"], "answer": "自托管部署"},
+    {"q": "那座城市还有哪些地标?", "history": [
+        {"question": "涩谷那个全世界最忙的十字路口在哪个首都?", "answer": "东京"}],
+     "relevant": ["doc_tokyo"], "answer": "东京塔、浅草寺"},
+    {"q": "这道料理的江户前流派以哪两种食材为代表?", "history": [
+        {"question": "醋饭顶着生鱼片的那道日本料理是什么?", "answer": "寿司"}],
+     "relevant": ["doc_sushi"], "answer": "金枪鱼和玉子烧"},
+    {"q": "它的镜像靠什么文件系统构建?", "history": [
+        {"question": "把应用连同依赖打包成镜像隔离跑起来的技术叫什么?", "answer": "Docker"}],
+     "relevant": ["doc_docker"], "answer": "分层文件系统"},
+    {"q": "它原生支持什么请求处理方式?", "history": [
+        {"question": "写接口自动出OpenAPI文档的Python Web框架选谁?", "answer": "FastAPI"}],
+     "relevant": ["doc_fastapi"], "answer": "async异步请求处理"},
+    {"q": "它的输出形态是什么?", "history": [
+        {"question": "机器可解析的键值对结构化日志用哪个库?", "answer": "structlog"}],
+     "relevant": ["doc_structlog"], "answer": "键值对(机器可解析)"},
+    {"q": "那座城市还有什么穿城而过?", "history": [
+        {"question": "西湖十景在哪座城市?", "answer": "杭州"}],
+     "relevant": ["doc_hangzhou"], "answer": "京杭大运河"},
+    {"q": "它的用户社区叫什么?", "history": [
+        {"question": "主打换电站补能的中国车企是哪家?", "answer": "蔚来"}],
+     "relevant": ["doc_nio"], "answer": "NIO House"},
+    {"q": "这个星系的直径是多少?", "history": [
+        {"question": "太阳系呆在哪个星系里?", "answer": "银河系"}],
+     "relevant": ["doc_milkyway"], "answer": "约10万光年"},
+    {"q": "它主要栖息在哪些省?", "history": [
+        {"question": "吃竹子的中国国宝是谁?", "answer": "大熊猫"}],
+     "relevant": ["doc_panda"], "answer": "四川、陕西和甘肃"},
+    {"q": "这座宫殿建筑群位于哪里?", "history": [
+        {"question": "紫禁城住过哪两个朝代的皇帝?", "answer": "明清两代"}],
+     "relevant": ["doc_forbidden_city"], "answer": "北京中轴线核心"},
+    {"q": "那这个思路的缩写叫什么?", "history": [
+        {"question": "检索增强生成为什么能降低幻觉?", "answer": "检索外部知识库减少幻觉"}],
+     "relevant": ["doc_rag"], "answer": "RAG(检索增强生成)"},
+    {"q": "它对稀疏向量做哪种统计加权?", "history": [
+        {"question": "哪个向量库支持原生稀疏和RRF融合?", "answer": "Qdrant"}],
+     "relevant": ["doc_vecdb"], "answer": "IDF加权"},
+    {"q": "那寿司饭用什么调味?", "history": [
+        {"question": "哪道西餐主食的经典吃法是配番茄罗勒酱?", "answer": "意大利面"}],
+     "relevant": ["doc_sushi"], "answer": "醋(醋饭)"},  # 话题切换型: 前轮意面后轮寿司
 ]
 
 # v3新增: 不可答负样本(语料完全不含答案; 部分含干扰项检索噪声如tesla/gpt/k8s)

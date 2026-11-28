@@ -130,7 +130,9 @@ async def eval_retrieval(config: str, writer: QdrantWriter) -> dict[str, float |
     fallback_count = 0
     lats: list[float] = []
 
-    for golden in GOLDEN:
+    # v5: 多轮问(带history)跳过漏斗 — follow-up单独检索必失配, 漏斗保持单轮口径; 多轮质量由CRAG行承载
+    single_turn = [g for g in GOLDEN if not g.get("history")]
+    for golden in single_turn:
         started = time.perf_counter()
         dense = await embed_query(golden["q"])
         if spec["kind"] == "dense":
@@ -163,7 +165,7 @@ async def eval_retrieval(config: str, writer: QdrantWriter) -> dict[str, float |
             agg[key] += final_metrics[key]
         lats.append((time.perf_counter() - started) * 1000)
 
-    n = len(GOLDEN)
+    n = len(single_turn)
     return {
         **{key: value / n for key, value in agg.items() if key != "candidate_recall@20"},
         "candidate_recall@20": agg["candidate_recall@20"] / candidate_20_count
@@ -175,13 +177,19 @@ async def eval_retrieval(config: str, writer: QdrantWriter) -> dict[str, float |
     }
 
 
-async def _judge_answer(question: str, answer: str, docs: list, reference: str) -> dict | None:
+async def _judge_answer(question: str, answer: str, docs: list, reference: str,
+                        history: list | None = None) -> dict | None:
     """P1② 独立judge: 异模型(purpose=judge→CHAT_JUDGE_MODEL)对照参考答案评分, 替代verifier自评(1.000无信息量).
+    多轮问(golden v5)携带history消解指代 — judge与被评系统看同样上下文, 否则follow-up必评错.
     失败/解析错返回None(计skip, 不进judge均值). CHAT_JUDGE_MODEL空时purpose回退fast=自评口径, 报告应标注."""
     try:
         from src.core.llm import chat_json
         from src.prompts import JUDGE_PROMPT
         evidence = "\n\n".join(f"[{i+1}] {d.content}" for i, d in enumerate(docs))
+        if history:
+            hist_text = "\n".join(f"用户: {h.get('question', '')}\n助手: {h.get('answer', '')}"
+                                  for h in history)
+            question = f"对话历史(用于消解指代):\n{hist_text}\n\n当前问题: {question}"
         res = await chat_json([{"role": "user", "content": JUDGE_PROMPT.format(
             question=question, reference=reference, answer=answer, evidence=evidence)}],
             purpose="judge")
@@ -225,16 +233,23 @@ def _ckpt_append(ckpt_path: str | None, rec: dict[str, Any]) -> None:
 
 async def eval_crag(writer: QdrantWriter, subset: int | None = None,
                     ckpt_path: str | None = None,
-                    max_questions: int | None = None) -> dict[str, Any]:
+                    max_questions: int | None = None,
+                    idx_from: int | None = None, idx_to: int | None = None) -> dict[str, Any]:
     """Run CRAG with the isolated collection; per-question retries captured for p95 tail attribution.
     P1②: 带参考答案的问题额外走独立judge(异模型)评answer_correct/grounded/citation.
+    golden v5: 多轮问(item["history"])注入conversation_history — 预改写指代消解/多轮grade链路被端到端评测.
     断点续跑: ckpt_path载入已完成逐问记录, max_questions限制单次块大小(20261126实测后台长跑
-    会在~21分钟被静默杀死且无Traceback, 分块使损失有界); 未跑完返回{"partial": True}由调用方续跑."""
+    会在~21分钟被静默杀死且无Traceback, 分块使损失有界); 未跑完返回{"partial": True}由调用方续跑.
+    idx_from/idx_to: 只跑[idx_from, idx_to)区间(v5多轮问单独跑用, 免重跑前100单轮)."""
     golden = GOLDEN[:subset] if subset else GOLDEN
     records = [r for r in _load_ckpt_records(ckpt_path)
                if isinstance(r.get("idx"), int) and 0 <= r["idx"] < len(golden)]
     done_idx = {r["idx"] for r in records}
     pending = [i for i in range(len(golden)) if i not in done_idx]
+    if idx_from is not None or idx_to is not None:
+        lo = idx_from if idx_from is not None else 0
+        hi = idx_to if idx_to is not None else len(golden)
+        pending = [i for i in pending if lo <= i < hi]
     if max_questions is not None:
         pending = pending[:max_questions]
 
@@ -253,6 +268,7 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None,
                 graph.ainvoke(
                     {"question": item["q"], "query": item["q"], "tenant_id": "default", "retry_count": 0,
                      "documents": [], "search_decision": "", "generation": "", "verification": None,
+                     "conversation_history": item.get("history") or [],  # v5: 多轮问注入历史(预改写指代消解依赖它)
                      "mode": "kb"},  # ponytail: 显式kb模式走CRAG检索闭环; 缺省quick会进tool_agent(联网), 与检索消融不可比
                     config=cfg,
                 ), timeout=QUESTION_TIMEOUT_S)
@@ -300,14 +316,16 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None,
             "citations_valid": bool(verification.get("citations_valid")),
             "retries": retries,
             "judge_answer": None, "judge_grounded": None, "judge_citation": None,
+            "mt": bool(item.get("history")),  # v5: 多轮问标记(聚合分析用)
         }
-        # P1②: 独立judge对照参考答案评分(带answer字段的问题才评)
+        # P1②: 独立judge对照参考答案评分(带answer字段的问题才评); v5多轮问judge携带历史消解指代
         ref = item.get("answer")
         if ref:
             try:
                 j = await asyncio.wait_for(
                     _judge_answer(item["q"], values.get("generation", ""),
-                                  values.get("documents", []), ref), timeout=180)
+                                  values.get("documents", []), ref,
+                                  history=item.get("history")), timeout=180)
             except asyncio.TimeoutError:
                 log.warning("eval_crag_judge_timeout", idx=idx)
                 j = None
@@ -319,9 +337,14 @@ async def eval_crag(writer: QdrantWriter, subset: int | None = None,
         _ckpt_append(ckpt_path, rec)
         log.info("eval_crag_progress", idx=idx, done=len(records), total=len(golden))
 
-    if any(i not in {r["idx"] for r in records} for i in range(len(golden))):
-        return {"partial": True, "done_n": len(records), "n": len(golden)}
-    return _aggregate_crag(records, len(golden))
+    lo = idx_from if idx_from is not None else 0
+    hi = idx_to if idx_to is not None else len(golden)
+    targets = [i for i in range(len(golden)) if lo <= i < hi]
+    done = {r["idx"] for r in records}
+    if any(i not in done for i in targets):
+        return {"partial": True, "done_n": len(records), "n": len(targets)}
+    target_records = [r for r in records if r["idx"] in set(targets)]
+    return _aggregate_crag(target_records, len(targets))
 
 
 def _aggregate_crag(records: list[dict[str, Any]], n: int) -> dict[str, Any]:

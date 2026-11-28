@@ -1,4 +1,4 @@
-"""golden v4 数据完整性(P1②评测效度) — 纯数据断言, 无外部服务, CI可跑."""
+"""golden v5 数据完整性(P1②评测效度 + v5多轮链路) — 纯数据断言, 无外部服务, CI可跑."""
 
 import re
 
@@ -15,8 +15,8 @@ DOC_IDS = {doc_id for doc_id, _ in DOCUMENTS}
 
 
 def test_version_and_scale():
-    assert GOLDEN_VERSION == "v4"
-    assert len(GOLDEN) == 100, "v4 = v3的62问 + 38新问(20口语+8跨簇+10关键词)"
+    assert GOLDEN_VERSION == "v5"
+    assert len(GOLDEN) == 120, "v5 = v4的100问 + 20多轮问"
     assert len(UNANSWERABLE) >= 18
 
 
@@ -41,16 +41,37 @@ def test_all_topics_covered():
 
 
 def test_no_duplicate_questions():
-    """v4新增: 逐字重复问会虚增样本量/污染逐问配对对照."""
     qs = [g["q"] for g in GOLDEN]
     assert len(qs) == len(set(qs)), "存在逐字重复问题"
 
 
 def test_keyword_queries_contain_ascii_tokens():
-    """清单不变式: 尾部8问为关键词型(含ASCII精确token) — BM25稀疏路应发挥的查询类型."""
-    tail8 = GOLDEN[-8:]
+    """清单不变式: 单轮段尾部8问为关键词型(含ASCII精确token) — BM25稀疏路应发挥的查询类型."""
+    tail8 = GOLDEN[92:100]
+    assert len(tail8) == 8 and not any(g.get("history") for g in tail8)
     for g in tail8:
         assert re.search(r"[A-Za-z]", g["q"]), f"关键词型问句无ASCII token: {g['q']}"
+
+
+def test_multi_turn_integrity():
+    """v5核心: 多轮问必须有非空history(question/answer齐全), follow-up含指代, 且指代能由history消解."""
+    mt = [g for g in GOLDEN if g.get("history")]
+    assert len(mt) == 20, f"v5多轮问应20个, 实际{len(mt)}"
+    for g in mt:
+        assert isinstance(g["history"], list) and g["history"], f"history为空: {g['q']}"
+        for h in g["history"]:
+            assert (h.get("question") or "").strip() and (h.get("answer") or "").strip(), \
+                f"history轮次缺question/answer: {g['q']}"
+        assert re.search(r"它|那[个座道家]|这[个座]|该|此", g["q"]), \
+            f"follow-up无指代词(不是多轮模式): {g['q']}"
+        assert not (g["q"] in UNANSWERABLE)
+
+
+def test_multi_turn_followups_not_duplicates_of_single_turn():
+    """follow-up不得与单轮问逐字重复(去重测试只查全清单, 这里保证多轮独立有效性)."""
+    mt_qs = {g["q"] for g in GOLDEN if g.get("history")}
+    st_qs = {g["q"] for g in GOLDEN if not g.get("history")}
+    assert not (mt_qs & st_qs)
 
 
 def test_unanswerable_structured_and_disjoint():

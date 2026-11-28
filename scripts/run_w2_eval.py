@@ -58,7 +58,8 @@ def _keep_system_awake(enable: bool):
 
 
 async def main(only: str = "all", resumable: bool = False, max_q: str | None = None,
-               merge_from: str | None = None):
+               merge_from: str | None = None, idx_from: str | None = None,
+               idx_to: str | None = None):
     """only: all(默认) / retrieval(仅漏斗) / crag(仅CRAG+不可答).
     resumable: CRAG逐问checkpoint到临时文件, 配合--max-q分块续跑(后台长跑会被~20min静默杀死);
     merge_from: 预载此前retrieval-only trial的CSV行(漏斗数字确定可复用, 免重跑5分钟)."""
@@ -124,7 +125,9 @@ async def main(only: str = "all", resumable: bool = False, max_q: str | None = N
             crag, una = {}, None
             print("\n  +CRAG(agent工具检索, 含生成指标, 调LLM较慢)...")
             crag = await eval_crag(writer, ckpt_path=ckpt,
-                                   max_questions=int(max_q) if max_q else None)
+                                   max_questions=int(max_q) if max_q else None,
+                                   idx_from=int(idx_from) if idx_from else None,
+                                   idx_to=int(idx_to) if idx_to else None)
             if crag.get("partial"):
                 print(f"[partial] CRAG断点进度 {crag['done_n']}/{crag['n']} "
                       f"— 再次运行同一命令续跑(本块截止, 未产出报告)")
@@ -280,4 +283,6 @@ if __name__ == "__main__":
     asyncio.run(main(_arg("--only", "all"),
                      resumable="--resumable" in sys.argv,
                      max_q=_arg("--max-q"),
-                     merge_from=_arg("--merge-from")))
+                     merge_from=_arg("--merge-from"),
+                     idx_from=_arg("--idx-from"),
+                     idx_to=_arg("--idx-to")))
