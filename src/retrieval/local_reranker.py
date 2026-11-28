@@ -6,7 +6,6 @@ import threading
 from pathlib import Path
 
 from src.core.logging import log
-from src.core.config import get_settings
 from src.storage.protocol import RetrievedDocument
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "models" / "bge-reranker-v2-m3"
