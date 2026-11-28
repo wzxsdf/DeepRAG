@@ -1,0 +1,6 @@
+config,candidate_recall@5,candidate_recall@20,recall@1,recall@5,mrr@5,ndcg@5,faithfulness,citation_acc,judge_answer,judge_grounded,judge_citation,p50_ms,p95_ms,rerank_fallbacks,retries_total,retried_n,judge_n,n
+dense-only,0.940,,0.830,0.940,0.887,0.891,,,,,,1369.471,2033.732,0.000,,,,100
++hybrid(RRF),0.940,,0.830,0.940,0.887,0.891,,,,,,1315.372,1854.363,0.000,,,,100
+funnel top5->rerank5,0.940,,0.870,0.940,0.915,0.912,,,,,,2203.323,3327.633,0.000,,,,100
+funnel top20->rerank5,0.940,1.000,0.870,0.957,0.925,0.922,,,,,,2415.784,4113.627,0.000,,,,100
++CRAG,,,0.760,0.775,0.775,0.767,0.790,0.790,0.894,0.830,0.851,9858.822,29020.719,,1,1,94,100
