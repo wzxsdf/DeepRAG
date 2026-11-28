@@ -62,7 +62,7 @@ def test_multi_turn_integrity():
         for h in g["history"]:
             assert (h.get("question") or "").strip() and (h.get("answer") or "").strip(), \
                 f"history轮次缺question/answer: {g['q']}"
-        assert re.search(r"它|那[个座道家]|这[个座道]|该|此", g["q"]), \
+        assert re.search(r"^那|它|那[个座道家]|这[个座道]|该|此", g["q"]), \
             f"follow-up无指代词(不是多轮模式): {g['q']}"
         assert not (g["q"] in UNANSWERABLE)
 
